@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    name: Rust, shell, and deployment contracts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Shell contracts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck scripts/*.sh scripts/marian-mlxctl docker/*.sh
+          for script in scripts/*.sh scripts/marian-mlxctl docker/*.sh; do
+            sh -n "$script"
+          done
+      - name: Compose contract
+        run: docker compose config --quiet
+      - name: Dockerfile parses
+        run: docker build --check .
+
+  licenses:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  apple-native:
+    name: Apple Silicon MLX build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Ensure Metal compiler is available
+        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+      - name: Build pinned MLX
+        run: scripts/build-mlx.sh
+      - name: Check native backend
+        run: cargo check --locked -p marian-server --features mlx

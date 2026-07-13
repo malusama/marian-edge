@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose a scoped language, backend, API, or operations improvement
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and tradeoffs
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Model, license, hardware, or benchmark evidence

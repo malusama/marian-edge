@@ -1,0 +1,12 @@
+.git
+.github
+.cache
+build
+dist
+models
+target
+third_party
+*.npz
+*.safetensors
+*.dSYM
+.DS_Store
