@@ -376,7 +376,7 @@ model_is_valid() {
   [ -f "$BASE/models/en-zh/target.spm" ] && \
   [ -f "$BASE/models/en-zh/shortlist.bin" ] && \
   [ "$(shasum -a 256 "$BASE/models/en-zh/model.fp32.safetensors" | awk '{print $1}')" = \
-    fcd6f7a791293b6f9b6a959b7e9ee856a34d451afecaed2dcb5ac314b47f6967 ] && \
+    e030217aa5d10fa719a938af10ac6138171687472d3142313284b35099679bd5 ] && \
   [ "$(shasum -a 256 "$BASE/models/en-zh/source.spm" | awk '{print $1}')" = \
     bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5 ] && \
   [ "$(shasum -a 256 "$BASE/models/en-zh/target.spm" | awk '{print $1}')" = \

@@ -5,6 +5,13 @@ Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-14
+
+### Fixed
+
+- Made converted model artifacts byte-for-byte reproducible for native install
+  verification.
+
 ## [0.1.0] - 2026-07-14
 
 ### Added
@@ -19,5 +26,6 @@ Versioning after the first stable release.
   `zh`.
 - Rootless launchd installer and CPU-only multi-architecture Docker path.
 
-[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/malusama/marian-mlx/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/malusama/marian-mlx/releases/tag/v0.1.0

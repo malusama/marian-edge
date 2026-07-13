@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import shutil
+import struct
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -133,6 +135,57 @@ def copy_asset(source: Path, destination: Path) -> str:
     return sha256(destination)
 
 
+def canonicalize_safetensors_header(path: Path) -> None:
+    """Rewrite the JSON header in a byte-stable order.
+
+    safetensors preserves tensor bytes, but its metadata map can be serialized in
+    a different key order between processes. Canonical JSON keeps the complete
+    file checksum reproducible without changing any tensor offsets or payloads.
+    """
+    temporary: Path | None = None
+    try:
+        with path.open("rb") as source:
+            size_bytes = source.read(8)
+            if len(size_bytes) != 8:
+                raise ValueError("safetensors file has a truncated header length")
+            (header_size,) = struct.unpack("<Q", size_bytes)
+            if header_size == 0 or header_size > 100 * 1024 * 1024:
+                raise ValueError(f"invalid safetensors header size: {header_size}")
+            header_bytes = source.read(header_size)
+            if len(header_bytes) != header_size:
+                raise ValueError("safetensors file has a truncated JSON header")
+            header = json.loads(header_bytes)
+            if not isinstance(header, dict):
+                raise ValueError("safetensors header is not a JSON object")
+
+            canonical = json.dumps(
+                header,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            canonical += b" " * (-len(canonical) % 8)
+
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".canonical",
+                delete=False,
+            ) as destination:
+                temporary = Path(destination.name)
+                destination.write(struct.pack("<Q", len(canonical)))
+                destination.write(canonical)
+                shutil.copyfileobj(source, destination, length=1024 * 1024)
+        if temporary is None:
+            raise RuntimeError("failed to create a canonical safetensors file")
+        shutil.copymode(path, temporary)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main() -> None:
     args = parse_args()
     model_hash = sha256(args.model)
@@ -169,6 +222,7 @@ def main() -> None:
             "marian_config": graph_config,
         },
     )
+    canonicalize_safetensors_header(weights_path)
 
     source_name = "source.spm"
     target_name = "target.spm"

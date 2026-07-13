@@ -36,8 +36,8 @@ For a pinned release:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.1.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.1.0 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.1.1/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.1.1 sh
 ```
 
 You can inspect the script before running it. First install needs about 750 MB
