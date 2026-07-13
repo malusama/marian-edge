@@ -1,0 +1,68 @@
+name: Release macOS
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+      - name: Select Xcode 16.4
+        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Ensure Metal compiler is available
+        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
+      - name: Portable release gates
+        run: make check
+      - name: Check tag version
+        run: |
+          TAG_VERSION=${GITHUB_REF_NAME#v}
+          WORKSPACE_VERSION=$(awk '
+            /^\[workspace.package\]$/ {inside = 1; next}
+            /^\[/ {inside = 0}
+            inside && /^version = / {
+              gsub(/^[^"]*"|".*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+          test -n "$WORKSPACE_VERSION"
+          test "$TAG_VERSION" = "$WORKSPACE_VERSION"
+      - name: Build release archive
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          VERSION=${VERSION#v}
+          export VERSION
+          scripts/build-mlx.sh
+          scripts/package-macos.sh
+          cp scripts/install-macos.sh dist/install-macos.sh
+          (cd dist && shasum -a 256 install-macos.sh >> SHA256SUMS)
+      - name: Attest runtime archive
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/marian-mlx-macos-arm64.tar.gz
+      - name: Attest installer
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/install-macos.sh
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+          gh release upload "$GITHUB_REF_NAME" --clobber \
+            dist/marian-mlx-macos-arm64.tar.gz \
+            dist/SHA256SUMS \
+            dist/install-macos.sh

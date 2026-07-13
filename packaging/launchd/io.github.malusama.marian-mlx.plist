@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.malusama.marian-mlx</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@PROGRAM@</string>
+    <string>--backend</string>
+    <string>mlx</string>
+    <string>--model-dir</string>
+    <string>@MODEL_DIR@</string>
+    <string>--bind</string>
+    <string>@BIND@</string>
+    @CORS_ARGUMENT@
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MARIAN_MLX_METALLIB</key>
+    <string>@METALLIB@</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>@STDOUT@</string>
+  <key>StandardErrorPath</key>
+  <string>@STDERR@</string>
+</dict>
+</plist>

@@ -1,0 +1,410 @@
+#!/bin/sh
+set -eu
+
+BASE=${MARIAN_MLX_HOME:-"$HOME/.local/share/marian-mlx"}
+STATE=${MARIAN_MLX_STATE:-"$HOME/.local/state/marian-mlx"}
+BIN_DIR=${MARIAN_MLX_BIN_DIR:-"$HOME/.local/bin"}
+REPOSITORY=${MARIAN_MLX_REPOSITORY:-malusama/marian-mlx}
+REQUESTED_VERSION=${MARIAN_MLX_VERSION:-latest}
+LABEL=io.github.malusama.marian-mlx
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+CONFIG_DIR="$BASE/config"
+LEGACY_LABEL_CONFIG="$CONFIG_DIR/legacy-label"
+LEGACY_ARCHIVE_CONFIG="$CONFIG_DIR/legacy-archive"
+DOMAIN="gui/$(id -u)"
+
+if [ "${MARIAN_MLX_PORT+x}" = x ]; then
+  PORT=$MARIAN_MLX_PORT
+elif [ -f "$CONFIG_DIR/port" ]; then
+  PORT=$(sed -n '1p' "$CONFIG_DIR/port")
+else
+  PORT=3000
+fi
+case "$PORT" in
+  ''|*[!0-9]*) echo "invalid service port: $PORT" >&2; exit 1 ;;
+esac
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+  echo "invalid service port: $PORT" >&2
+  exit 1
+fi
+
+if [ "${MARIAN_MLX_CORS_ORIGIN+x}" = x ]; then
+  CORS_ORIGIN=$MARIAN_MLX_CORS_ORIGIN
+elif [ -f "$CONFIG_DIR/cors-origin" ]; then
+  CORS_ORIGIN=$(sed -n '1p' "$CONFIG_DIR/cors-origin")
+else
+  CORS_ORIGIN=
+fi
+
+usage() {
+  echo "usage: marian-mlxctl {status|logs|restart|stop|start|verify|rollback|update|uninstall [--purge]}"
+}
+
+is_loaded() {
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1
+}
+
+port_is_listening() {
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+wait_for_port_free() {
+  attempt=0
+  while port_is_listening && [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  ! port_is_listening
+}
+
+start_service() {
+  launchctl enable "$DOMAIN/$LABEL"
+  if is_loaded; then
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+  else
+    launchctl bootstrap "$DOMAIN" "$PLIST"
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+  fi
+}
+
+is_ready() {
+  curl --max-time 2 -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1 &&
+    curl --max-time 2 -fsS "http://127.0.0.1:$PORT/info" 2>/dev/null |
+      grep -Eq '"name"[[:space:]]*:[[:space:]]*"mlx"'
+}
+
+wait_until_ready() {
+  attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    if is_loaded && is_ready; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
+legacy_rollback_is_configured() {
+  [ -e "$LEGACY_LABEL_CONFIG" ] || [ -L "$LEGACY_LABEL_CONFIG" ] ||
+    [ -e "$LEGACY_ARCHIVE_CONFIG" ] || [ -L "$LEGACY_ARCHIVE_CONFIG" ]
+}
+
+load_legacy_rollback() {
+  if [ ! -f "$LEGACY_LABEL_CONFIG" ] || [ -L "$LEGACY_LABEL_CONFIG" ] ||
+     [ ! -f "$LEGACY_ARCHIVE_CONFIG" ] || [ -L "$LEGACY_ARCHIVE_CONFIG" ]; then
+    echo "previous service rollback metadata is incomplete" >&2
+    return 1
+  fi
+  if [ "$(awk 'END {print NR}' "$LEGACY_LABEL_CONFIG")" -ne 1 ] ||
+     [ "$(awk 'END {print NR}' "$LEGACY_ARCHIVE_CONFIG")" -ne 1 ]; then
+    echo "previous service rollback metadata is invalid" >&2
+    return 1
+  fi
+  LEGACY_LABEL=$(sed -n '1p' "$LEGACY_LABEL_CONFIG")
+  case "$LEGACY_LABEL" in
+    ''|*[!A-Za-z0-9._-]*)
+      echo "previous service label is invalid" >&2
+      return 1
+      ;;
+  esac
+  if [ "$LEGACY_LABEL" = "$LABEL" ]; then
+    echo "previous service label conflicts with the current service" >&2
+    return 1
+  fi
+  LEGACY_ARCHIVE=$(sed -n '1p' "$LEGACY_ARCHIVE_CONFIG")
+  if [ "$(dirname -- "$LEGACY_ARCHIVE")" != "$BASE/legacy" ]; then
+    echo "previous service archive path is invalid" >&2
+    return 1
+  fi
+  case "$(basename -- "$LEGACY_ARCHIVE")" in
+    "$LEGACY_LABEL".*.plist) ;;
+    *)
+      echo "previous service archive name is invalid" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -f "$LEGACY_ARCHIVE" ] || [ -L "$LEGACY_ARCHIVE" ]; then
+    echo "previous service archive is missing" >&2
+    return 1
+  fi
+  plutil -lint "$LEGACY_ARCHIVE" >/dev/null || {
+    echo "previous service archive is invalid" >&2
+    return 1
+  }
+  ARCHIVED_LABEL=$(plutil -extract Label raw -o - "$LEGACY_ARCHIVE" 2>/dev/null || true)
+  if [ "$ARCHIVED_LABEL" != "$LEGACY_LABEL" ]; then
+    echo "previous service archive label does not match its metadata" >&2
+    return 1
+  fi
+  LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
+}
+
+legacy_is_loaded() {
+  launchctl print "$DOMAIN/$LEGACY_LABEL" >/dev/null 2>&1
+}
+
+legacy_is_ready() {
+  ! is_loaded && legacy_is_loaded &&
+    curl --max-time 2 -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1
+}
+
+wait_until_legacy_ready() {
+  attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    if legacy_is_ready; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+  return 1
+}
+
+recover_current_after_legacy_failure() {
+  trap '' HUP INT TERM
+  RECOVERY_OK=true
+  if legacy_is_loaded; then
+    launchctl bootout "$DOMAIN/$LEGACY_LABEL" >/dev/null 2>&1 || RECOVERY_OK=false
+  fi
+  launchctl disable "$DOMAIN/$LEGACY_LABEL" >/dev/null 2>&1 || RECOVERY_OK=false
+  attempt=0
+  while legacy_is_loaded && [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  if legacy_is_loaded; then
+    echo "previous service is still registered with launchd" >&2
+    RECOVERY_OK=false
+  elif [ "${LEGACY_PLIST_CREATED:-false}" = true ]; then
+    rm -f "$LEGACY_PLIST" || RECOVERY_OK=false
+  fi
+  if ! wait_for_port_free; then
+    echo "previous service did not release port $PORT" >&2
+    RECOVERY_OK=false
+  fi
+  if [ "$RECOVERY_OK" = true ] && [ "${CURRENT_WAS_LOADED:-false}" = true ]; then
+    if ! start_service || ! wait_until_ready; then
+      echo "current service recovery failed; manual intervention is required" >&2
+      RECOVERY_OK=false
+    fi
+  fi
+  trap - HUP INT TERM
+  [ "$RECOVERY_OK" = true ]
+}
+
+interrupt_legacy_restore() {
+  recover_current_after_legacy_failure || true
+  exit 130
+}
+
+rollback_to_legacy() {
+  load_legacy_rollback || return 1
+  if legacy_is_loaded; then
+    CURRENT_WAS_LOADED=false
+    LEGACY_PLIST_CREATED=false
+    if is_loaded; then
+      CURRENT_WAS_LOADED=true
+      trap interrupt_legacy_restore HUP INT TERM
+      if ! launchctl bootout "$DOMAIN/$LABEL" >/dev/null; then
+        trap - HUP INT TERM
+        echo "could not stop the current service" >&2
+        return 1
+      fi
+    fi
+    if wait_until_legacy_ready && launchctl disable "$DOMAIN/$LABEL"; then
+      trap - HUP INT TERM
+      echo "already running the previous service"
+      return 0
+    fi
+    if [ "$CURRENT_WAS_LOADED" = true ]; then
+      recover_current_after_legacy_failure || true
+    else
+      trap - HUP INT TERM
+    fi
+    echo "the previous service is loaded but did not become ready" >&2
+    return 1
+  fi
+  if [ -e "$LEGACY_PLIST" ] || [ -L "$LEGACY_PLIST" ]; then
+    echo "refusing to overwrite $LEGACY_PLIST" >&2
+    return 1
+  fi
+
+  CURRENT_WAS_LOADED=false
+  LEGACY_PLIST_CREATED=false
+  is_loaded && CURRENT_WAS_LOADED=true
+  trap interrupt_legacy_restore HUP INT TERM
+  if [ "$CURRENT_WAS_LOADED" = true ]; then
+    if ! launchctl bootout "$DOMAIN/$LABEL" >/dev/null; then
+      trap - HUP INT TERM
+      echo "could not stop the current service" >&2
+      return 1
+    fi
+  fi
+  if ! wait_for_port_free; then
+    echo "port $PORT did not become available; restoring the current service" >&2
+    recover_current_after_legacy_failure || true
+    return 1
+  fi
+
+  LEGACY_PLIST_CREATED=true
+  if install -m 0644 "$LEGACY_ARCHIVE" "$LEGACY_PLIST" &&
+     launchctl enable "$DOMAIN/$LEGACY_LABEL" &&
+     launchctl bootstrap "$DOMAIN" "$LEGACY_PLIST" >/dev/null 2>&1 &&
+     launchctl kickstart -k "$DOMAIN/$LEGACY_LABEL" >/dev/null 2>&1 &&
+     wait_until_legacy_ready &&
+     launchctl disable "$DOMAIN/$LABEL"; then
+    trap - HUP INT TERM
+    echo "rolled back to the previous service"
+    return 0
+  fi
+
+  echo "previous service did not become ready; restoring the current service" >&2
+  recover_current_after_legacy_failure || true
+  return 1
+}
+
+verify_model() {
+  test -f "$BASE/models/en-zh/manifest.json" &&
+  grep -Eq '"format"[[:space:]]*:[[:space:]]*"marian-mlx\.transformer-ssru\.v1"' \
+    "$BASE/models/en-zh/manifest.json" &&
+  test "$(shasum -a 256 "$BASE/models/en-zh/model.fp32.safetensors" | awk '{print $1}')" = \
+    fcd6f7a791293b6f9b6a959b7e9ee856a34d451afecaed2dcb5ac314b47f6967 &&
+  test "$(shasum -a 256 "$BASE/models/en-zh/source.spm" | awk '{print $1}')" = \
+    bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5 &&
+  test "$(shasum -a 256 "$BASE/models/en-zh/target.spm" | awk '{print $1}')" = \
+    aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d &&
+  test "$(shasum -a 256 "$BASE/models/en-zh/shortlist.bin" | awk '{print $1}')" = \
+    8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681
+}
+
+download() {
+  destination=$1
+  url=$2
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --fail --location --retry 4 --retry-all-errors \
+    --connect-timeout 15 --speed-limit 1024 --speed-time 60 --max-time 1800 \
+    --output "$destination" "$url"
+}
+
+case "${1:-}" in
+  status)
+    is_loaded && echo "launchd: loaded" || echo "launchd: stopped"
+    if curl --max-time 2 -fsS "http://127.0.0.1:$PORT/info"; then
+      echo
+    fi
+    ;;
+  logs)
+    tail -f "$STATE/server.log" "$STATE/server.error.log"
+    ;;
+  restart)
+    start_service
+    ;;
+  stop)
+    launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+    ;;
+  start)
+    start_service
+    ;;
+  verify)
+    test -x "$BASE/current/marian-mlx-server"
+    test -f "$BASE/current/libmlx.dylib"
+    test -f "$BASE/current/mlx.metallib"
+    test -f "$BASE/current/SHA256SUMS"
+    (cd "$BASE/current" && shasum -a 256 -c SHA256SUMS >/dev/null)
+    codesign --verify --strict "$BASE/current/marian-mlx-server"
+    codesign --verify --strict "$BASE/current/libmlx.dylib"
+    verify_model
+    is_ready
+    curl --max-time 2 -fsS "http://127.0.0.1:$PORT/info" && echo
+    ;;
+  rollback)
+    PREVIOUS=$(readlink "$BASE/previous" 2>/dev/null || true)
+    if [ -z "$PREVIOUS" ] || [ ! -d "$PREVIOUS" ]; then
+      if legacy_rollback_is_configured; then
+        rollback_to_legacy
+        exit $?
+      fi
+      echo "no previous release or service" >&2
+      exit 1
+    fi
+    CURRENT=$(readlink "$BASE/current" 2>/dev/null || true)
+    [ -n "$CURRENT" ] || {
+      echo "current release link is missing" >&2
+      exit 1
+    }
+    (cd "$PREVIOUS" && shasum -a 256 -c SHA256SUMS >/dev/null)
+    codesign --verify --strict "$PREVIOUS/marian-mlx-server"
+    codesign --verify --strict "$PREVIOUS/libmlx.dylib"
+    ln -sfn "$PREVIOUS" "$BASE/current.new"
+    mv -h "$BASE/current.new" "$BASE/current"
+    ln -sfn "$CURRENT" "$BASE/previous.new"
+    mv -h "$BASE/previous.new" "$BASE/previous"
+    if start_service && wait_until_ready; then
+      echo "rolled back to $PREVIOUS"
+    else
+      echo "rollback failed; restoring $CURRENT" >&2
+      ln -sfn "$CURRENT" "$BASE/current.new"
+      mv -h "$BASE/current.new" "$BASE/current"
+      ln -sfn "$PREVIOUS" "$BASE/previous.new"
+      mv -h "$BASE/previous.new" "$BASE/previous"
+      start_service || true
+      exit 1
+    fi
+    ;;
+  restore-previous-service)
+    if ! legacy_rollback_is_configured; then
+      echo "no previous service" >&2
+      exit 1
+    fi
+    rollback_to_legacy
+    ;;
+  update)
+    TMP=$(mktemp -d "${TMPDIR:-/tmp}/marian-mlx-update.XXXXXX")
+    trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+    if [ "$REQUESTED_VERSION" = latest ]; then
+      RELEASE_BASE="https://github.com/$REPOSITORY/releases/latest/download"
+    else
+      RELEASE_BASE="https://github.com/$REPOSITORY/releases/download/$REQUESTED_VERSION"
+    fi
+    download "$TMP/install-macos.sh" "$RELEASE_BASE/install-macos.sh"
+    download "$TMP/SHA256SUMS" "$RELEASE_BASE/SHA256SUMS"
+    MATCH_COUNT=$(awk \
+      '($2 == "install-macos.sh" || $2 == "*install-macos.sh") && length($1) == 64 && $1 ~ /^[0-9A-Fa-f]+$/ {n++} END {print n + 0}' \
+      "$TMP/SHA256SUMS")
+    [ "$MATCH_COUNT" -eq 1 ] || {
+      echo "release checksum must list install-macos.sh exactly once" >&2
+      exit 1
+    }
+    EXPECTED=$(awk \
+      '($2 == "install-macos.sh" || $2 == "*install-macos.sh") && length($1) == 64 && $1 ~ /^[0-9A-Fa-f]+$/ {print tolower($1)}' \
+      "$TMP/SHA256SUMS")
+    ACTUAL=$(shasum -a 256 "$TMP/install-macos.sh" | awk '{print $1}')
+    [ "$ACTUAL" = "$EXPECTED" ] || {
+      echo "installer checksum mismatch" >&2
+      exit 1
+    }
+    UPDATE_LEGACY_LABEL=
+    if legacy_rollback_is_configured; then
+      load_legacy_rollback
+      UPDATE_LEGACY_LABEL=$LEGACY_LABEL
+    fi
+    MARIAN_MLX_REPOSITORY="$REPOSITORY" \
+    MARIAN_MLX_VERSION="$REQUESTED_VERSION" \
+    MARIAN_MLX_HOME="$BASE" \
+    MARIAN_MLX_STATE="$STATE" \
+    MARIAN_MLX_BIN_DIR="$BIN_DIR" \
+    MARIAN_MLX_PORT="$PORT" \
+    MARIAN_MLX_CORS_ORIGIN="$CORS_ORIGIN" \
+    MARIAN_MLX_LEGACY_LABEL="$UPDATE_LEGACY_LABEL" \
+      sh "$TMP/install-macos.sh"
+    ;;
+  uninstall)
+    shift
+    export MARIAN_MLX_HOME="$BASE"
+    export MARIAN_MLX_STATE="$STATE"
+    export MARIAN_MLX_BIN_DIR="$BIN_DIR"
+    exec "$BASE/uninstall-macos.sh" "$@"
+    ;;
+  *) usage; exit 2 ;;
+esac

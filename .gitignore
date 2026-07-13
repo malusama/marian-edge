@@ -1,0 +1,11 @@
+/target/
+/build/
+/models/
+/dist/
+/.cache/
+*.npz
+*.safetensors
+*.dSYM/
+__pycache__/
+*.pyc
+.DS_Store

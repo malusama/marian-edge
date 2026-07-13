@@ -1,0 +1,26 @@
+[package]
+name = "marian-mlx"
+description = "Apple Silicon MLX backend for Marian translation models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+links = "marian_mlx_bridge"
+build = "build.rs"
+
+[features]
+default = []
+mlx = ["dep:cxx", "dep:sentencepiece"]
+
+[dependencies]
+cxx = { version = "1.0.194", optional = true }
+marian-core.workspace = true
+sentencepiece = { version = "0.13.1", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[build-dependencies]
+cxx-build = "1.0.194"

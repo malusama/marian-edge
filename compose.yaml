@@ -1,0 +1,28 @@
+services:
+  marian-mlx:
+    image: ghcr.io/malusama/marian-mlx:cpu
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      MARIAN_MLX_CPU_THREADS: "${MARIAN_MLX_CPU_THREADS:-1}"
+    volumes:
+      - marian-mlx-models:/models
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/readyz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 120s
+      retries: 6
+
+volumes:
+  marian-mlx-models:

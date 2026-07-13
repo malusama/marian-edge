@@ -1,0 +1,12 @@
+[package]
+name = "marian-bergamot"
+description = "Persistent Bergamot CPU backend for Marian MLX"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+marian-core.workspace = true
