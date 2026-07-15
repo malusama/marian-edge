@@ -4,12 +4,12 @@ set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
-if [ -z "${MARIAN_MLX_BUILD_GIT_SHA:-}" ]; then
-  MARIAN_MLX_BUILD_GIT_SHA=$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)
-  export MARIAN_MLX_BUILD_GIT_SHA
+if [ -z "${MARIAN_EDGE_BUILD_GIT_SHA:-}" ]; then
+  MARIAN_EDGE_BUILD_GIT_SHA=$(git rev-parse --short=12 HEAD 2>/dev/null || printf unknown)
+  export MARIAN_EDGE_BUILD_GIT_SHA
 fi
 
-REMAP="--remap-path-prefix=$ROOT=/workspace/marian-mlx --remap-path-prefix=$HOME=/home/build"
+REMAP="--remap-path-prefix=$ROOT=/workspace/marian-edge --remap-path-prefix=$HOME=/home/build"
 export RUSTFLAGS="${RUSTFLAGS:-} $REMAP"
 
 HOST=$(rustc -vV | awk '/^host:/{print $2}')
@@ -24,4 +24,4 @@ else
   rustup run "$TOOLCHAIN" cargo build --locked --release -p marian-server --features metal
 fi
 
-file target/release/marian-mlx-server
+file target/release/marian-edge-server

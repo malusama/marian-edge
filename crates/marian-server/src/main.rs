@@ -21,50 +21,51 @@ enum BackendKind {
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    #[arg(long, env = "MARIAN_MLX_BIND", default_value = "127.0.0.1:3000")]
+    #[arg(long, env = "MARIAN_EDGE_BIND", default_value = "127.0.0.1:3000")]
     bind: SocketAddr,
 
-    #[arg(long, env = "MARIAN_MLX_BACKEND", value_enum, default_value = "auto")]
+    #[arg(long, env = "MARIAN_EDGE_BACKEND", value_enum, default_value = "auto")]
     backend: BackendKind,
 
-    #[arg(long, env = "MARIAN_MLX_MODEL_DIR", default_value = "models/enzh")]
+    #[arg(long, env = "MARIAN_EDGE_MODEL_DIR", default_value = "models/enzh")]
     model_dir: PathBuf,
 
     #[arg(
         long,
-        env = "MARIAN_MLX_CPU_THREADS",
+        env = "MARIAN_EDGE_CPU_THREADS",
         default_value_t = 1,
         help = "Pure Rust CPU inference threads: 1, 2, or 4"
     )]
     cpu_threads: usize,
 
-    #[arg(long, env = "MARIAN_MLX_QUEUE_CAPACITY", default_value_t = 256)]
+    #[arg(long, env = "MARIAN_EDGE_QUEUE_CAPACITY", default_value_t = 256)]
     queue_capacity: usize,
 
-    #[arg(long, env = "MARIAN_MLX_MAX_BATCH_SIZE", default_value_t = 16)]
+    #[arg(long, env = "MARIAN_EDGE_MAX_BATCH_SIZE", default_value_t = 16)]
     max_batch_size: usize,
 
     #[arg(
         long,
-        env = "MARIAN_MLX_MAX_PADDED_SOURCE_CHARS",
+        env = "MARIAN_EDGE_MAX_PADDED_SOURCE_CHARS",
         default_value_t = 4096
     )]
     max_padded_source_chars: usize,
 
-    #[arg(long, env = "MARIAN_MLX_BATCH_WINDOW_US", default_value_t = 750)]
+    #[arg(long, env = "MARIAN_EDGE_BATCH_WINDOW_US", default_value_t = 750)]
     batch_window_us: u64,
 
-    #[arg(long, env = "MARIAN_MLX_REQUEST_TIMEOUT_MS", default_value_t = 30_000)]
+    #[arg(long, env = "MARIAN_EDGE_REQUEST_TIMEOUT_MS", default_value_t = 30_000)]
     request_timeout_ms: u64,
 
-    #[arg(long, env = "MARIAN_MLX_CORS_ORIGIN")]
+    #[arg(long, env = "MARIAN_EDGE_CORS_ORIGIN")]
     cors_origin: Option<HeaderValue>,
 
-    #[arg(long, env = "MARIAN_MLX_JSON_LOGS", default_value_t = false)]
+    #[arg(long, env = "MARIAN_EDGE_JSON_LOGS", default_value_t = false)]
     json_logs: bool,
 }
 
 fn main() -> Result<()> {
+    apply_legacy_env_aliases()?;
     let args = Args::parse();
     configure_cpu_threads(&args)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -72,6 +73,40 @@ fn main() -> Result<()> {
         .build()
         .context("failed to create Tokio runtime")?;
     runtime.block_on(run(args))
+}
+
+fn apply_legacy_env_aliases() -> Result<()> {
+    for suffix in [
+        "BIND",
+        "BACKEND",
+        "MODEL_DIR",
+        "CPU_THREADS",
+        "QUEUE_CAPACITY",
+        "MAX_BATCH_SIZE",
+        "MAX_PADDED_SOURCE_CHARS",
+        "BATCH_WINDOW_US",
+        "REQUEST_TIMEOUT_MS",
+        "CORS_ORIGIN",
+        "JSON_LOGS",
+    ] {
+        let primary_name = format!("MARIAN_EDGE_{suffix}");
+        let legacy_name = format!("MARIAN_MLX_{suffix}");
+        match (
+            std::env::var_os(&primary_name),
+            std::env::var_os(&legacy_name),
+        ) {
+            (Some(primary), Some(legacy)) if primary != legacy => anyhow::bail!(
+                "conflicting settings: {primary_name} and legacy {legacy_name} have different values"
+            ),
+            (None, Some(legacy)) => {
+                // SAFETY: this runs before Clap parsing, the Tokio runtime, or
+                // any worker thread exists.
+                unsafe { std::env::set_var(primary_name, legacy) };
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 async fn run(args: Args) -> Result<()> {
@@ -248,11 +283,11 @@ mod tests {
     #[test]
     fn backend_aliases_are_stable_and_bergamot_is_gone() {
         for alias in ["cpu", "cpu-fp32", "cpu-q8", "rust"] {
-            let args = Args::try_parse_from(["marian-mlx-server", "--backend", alias]).unwrap();
+            let args = Args::try_parse_from(["marian-edge-server", "--backend", alias]).unwrap();
             assert_eq!(args.backend, BackendKind::Cpu);
         }
-        let args = Args::try_parse_from(["marian-mlx-server", "--backend", "mlx"]).unwrap();
+        let args = Args::try_parse_from(["marian-edge-server", "--backend", "mlx"]).unwrap();
         assert_eq!(args.backend, BackendKind::Metal);
-        assert!(Args::try_parse_from(["marian-mlx-server", "--backend", "bergamot"]).is_err());
+        assert!(Args::try_parse_from(["marian-edge-server", "--backend", "bergamot"]).is_err());
     }
 }

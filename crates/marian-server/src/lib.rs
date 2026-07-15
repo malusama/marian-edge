@@ -217,7 +217,7 @@ async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         status: if ready { "ok" } else { "draining" },
         ready,
         version: env!("CARGO_PKG_VERSION"),
-        revision: env!("MARIAN_MLX_BUILD_GIT_SHA"),
+        revision: env!("MARIAN_EDGE_BUILD_GIT_SHA"),
         uptime_seconds: state.started.elapsed().as_secs(),
         backend: state.translator.backend_info().clone(),
     })
@@ -619,7 +619,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(info_body["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(info_body["revision"], env!("MARIAN_MLX_BUILD_GIT_SHA"));
+        assert_eq!(info_body["revision"], env!("MARIAN_EDGE_BUILD_GIT_SHA"));
 
         let health_response = app
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())

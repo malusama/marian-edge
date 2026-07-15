@@ -9,7 +9,8 @@ use marian_metal::MetalBackend;
 const PRODUCTION_BATCH_SIZE: usize = 16;
 
 fn model_dir() -> PathBuf {
-    std::env::var_os("MARIAN_MLX_MODEL_DIR")
+    std::env::var_os("MARIAN_EDGE_MODEL_DIR")
+        .or_else(|| std::env::var_os("MARIAN_MLX_MODEL_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../models/enzh"))
 }
@@ -104,7 +105,7 @@ fn translate_production_batches<B: TranslationBackend>(
 }
 
 #[test]
-#[ignore = "requires converted Mozilla en-zh weights and an Apple GPU; set MARIAN_MLX_MODEL_DIR to override the model directory"]
+#[ignore = "requires converted Mozilla en-zh weights and an Apple GPU; set MARIAN_EDGE_MODEL_DIR to override the model directory"]
 fn cpu_fp32_matches_direct_metal_for_deterministic_corpus() {
     let corpus = deterministic_corpus();
     let shortest = corpus.iter().map(String::len).min().unwrap();

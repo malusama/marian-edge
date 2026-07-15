@@ -56,7 +56,7 @@ jobs:
       - name: Attest runtime archive
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: dist/marian-mlx-macos-arm64.tar.gz
+          subject-path: dist/marian-edge-macos-arm64.tar.gz
       - name: Attest installer
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
@@ -71,6 +71,6 @@ jobs:
           fi
           gh release create "$GITHUB_REF_NAME" --verify-tag \
             --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md \
-            dist/marian-mlx-macos-arm64.tar.gz \
+            dist/marian-edge-macos-arm64.tar.gz \
             dist/SHA256SUMS \
             dist/install-macos.sh

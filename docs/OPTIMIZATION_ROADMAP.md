@@ -198,14 +198,14 @@ cargo +1.86.0 bench --locked -p marian-cpu \
 Useful Metal A/B and trace controls:
 
 ```sh
-MARIAN_MLX_METAL_PROFILE=m1 \
-MARIAN_MLX_METAL_ATTENTION=classic \
-  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+MARIAN_EDGE_METAL_PROFILE=m1 \
+MARIAN_EDGE_METAL_ATTENTION=classic \
+  target/release/marian-edge-server --backend metal --model-dir models/enzh
 
-MARIAN_MLX_METAL_PROFILE=m1 \
-MARIAN_MLX_METAL_ATTENTION=auto \
-MARIAN_MLX_METAL_FLASH_THRESHOLD=1 \
-  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+MARIAN_EDGE_METAL_PROFILE=m1 \
+MARIAN_EDGE_METAL_ATTENTION=auto \
+MARIAN_EDGE_METAL_FLASH_THRESHOLD=1 \
+  target/release/marian-edge-server --backend metal --model-dir models/enzh
 
 tools/profile_metal.sh \
   http://127.0.0.1:3000/translate /tmp/marian-metal.trace

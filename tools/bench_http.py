@@ -232,7 +232,7 @@ def main() -> None:
     output_hashes = {stable_output_hash(result) for _, result in results}
     measured_items = len(results) * items_per_request
     report = {
-        "schema": "marian-mlx.benchmark.v1",
+        "schema": "marian-edge.benchmark.v1",
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "commit": git_commit(args.commit),
         "server": fetch_info(args.url),

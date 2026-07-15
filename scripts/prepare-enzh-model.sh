@@ -5,7 +5,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OUTPUT=${1:-"$ROOT/models/enzh"}
 CACHE=${MODEL_CACHE_DIR:-"$ROOT/.cache/mozilla-enzh"}
 UV_BIN=${UV_BIN:-uv}
-PYTHON_VERSION=${MARIAN_MLX_CONVERTER_PYTHON:-3.12}
+PYTHON_VERSION=${MARIAN_EDGE_CONVERTER_PYTHON:-${MARIAN_MLX_CONVERTER_PYTHON:-3.12}}
 STAGING="${OUTPUT}.staging.$$"
 PREVIOUS="${OUTPUT}.previous.$$"
 BASE='https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g'

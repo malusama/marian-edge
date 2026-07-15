@@ -91,22 +91,22 @@ impl SchedulerStats {
         let s = self.snapshot();
         format!(
             concat!(
-                "# TYPE marian_mlx_requests_total counter\n",
-                "marian_mlx_requests_total{{status=\"accepted\"}} {}\n",
-                "marian_mlx_requests_total{{status=\"completed\"}} {}\n",
-                "marian_mlx_requests_total{{status=\"failed\"}} {}\n",
-                "marian_mlx_requests_total{{status=\"timed_out\"}} {}\n",
-                "marian_mlx_requests_total{{status=\"rejected\"}} {}\n",
-                "# TYPE marian_mlx_batches_total counter\n",
-                "marian_mlx_batches_total {}\n",
-                "# TYPE marian_mlx_batch_items_total counter\n",
-                "marian_mlx_batch_items_total {}\n",
-                "# TYPE marian_mlx_queue_depth gauge\n",
-                "marian_mlx_queue_depth {}\n",
-                "# TYPE marian_mlx_in_flight gauge\n",
-                "marian_mlx_in_flight {}\n",
-                "# TYPE marian_mlx_largest_batch gauge\n",
-                "marian_mlx_largest_batch {}\n",
+                "# TYPE marian_edge_requests_total counter\n",
+                "marian_edge_requests_total{{status=\"accepted\"}} {}\n",
+                "marian_edge_requests_total{{status=\"completed\"}} {}\n",
+                "marian_edge_requests_total{{status=\"failed\"}} {}\n",
+                "marian_edge_requests_total{{status=\"timed_out\"}} {}\n",
+                "marian_edge_requests_total{{status=\"rejected\"}} {}\n",
+                "# TYPE marian_edge_batches_total counter\n",
+                "marian_edge_batches_total {}\n",
+                "# TYPE marian_edge_batch_items_total counter\n",
+                "marian_edge_batch_items_total {}\n",
+                "# TYPE marian_edge_queue_depth gauge\n",
+                "marian_edge_queue_depth {}\n",
+                "# TYPE marian_edge_in_flight gauge\n",
+                "marian_edge_in_flight {}\n",
+                "# TYPE marian_edge_largest_batch gauge\n",
+                "marian_edge_largest_batch {}\n",
             ),
             s.accepted,
             s.completed,
@@ -181,7 +181,7 @@ impl Translator {
         let worker_config = config.clone();
 
         thread::Builder::new()
-            .name("marian-mlx-worker".into())
+            .name("marian-edge-worker".into())
             .spawn(move || {
                 let _guard = WorkerStoppedGuard {
                     stopped: Arc::clone(&worker_stopped_on_thread),

@@ -1,19 +1,29 @@
 #!/bin/sh
 set -eu
 
-BASE=${MARIAN_MLX_HOME:-"$HOME/.local/share/marian-mlx"}
-STATE=${MARIAN_MLX_STATE:-"$HOME/.local/state/marian-mlx"}
-BIN_DIR=${MARIAN_MLX_BIN_DIR:-"$HOME/.local/bin"}
-REPOSITORY=${MARIAN_MLX_REPOSITORY:-malusama/marian-mlx}
-REQUESTED_VERSION=${MARIAN_MLX_VERSION:-latest}
-LABEL=io.github.malusama.marian-mlx
+DEFAULT_BASE="$HOME/.local/share/marian-edge"
+DEFAULT_STATE="$HOME/.local/state/marian-edge"
+if [ ! -e "$DEFAULT_BASE" ] && [ -d "$HOME/.local/share/marian-mlx" ]; then
+  DEFAULT_BASE="$HOME/.local/share/marian-mlx"
+fi
+if [ ! -e "$DEFAULT_STATE" ] && [ -d "$HOME/.local/state/marian-mlx" ]; then
+  DEFAULT_STATE="$HOME/.local/state/marian-mlx"
+fi
+BASE=${MARIAN_EDGE_HOME:-${MARIAN_MLX_HOME:-$DEFAULT_BASE}}
+STATE=${MARIAN_EDGE_STATE:-${MARIAN_MLX_STATE:-$DEFAULT_STATE}}
+BIN_DIR=${MARIAN_EDGE_BIN_DIR:-${MARIAN_MLX_BIN_DIR:-"$HOME/.local/bin"}}
+REPOSITORY=${MARIAN_EDGE_REPOSITORY:-${MARIAN_MLX_REPOSITORY:-malusama/marian-edge}}
+REQUESTED_VERSION=${MARIAN_EDGE_VERSION:-${MARIAN_MLX_VERSION:-latest}}
+LABEL=io.github.malusama.marian-edge
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 CONFIG_DIR="$BASE/config"
 LEGACY_LABEL_CONFIG="$CONFIG_DIR/legacy-label"
 LEGACY_ARCHIVE_CONFIG="$CONFIG_DIR/legacy-archive"
 DOMAIN="gui/$(id -u)"
 
-if [ "${MARIAN_MLX_PORT+x}" = x ]; then
+if [ "${MARIAN_EDGE_PORT+x}" = x ]; then
+  PORT=$MARIAN_EDGE_PORT
+elif [ "${MARIAN_MLX_PORT+x}" = x ]; then
   PORT=$MARIAN_MLX_PORT
 elif [ -f "$CONFIG_DIR/port" ]; then
   PORT=$(sed -n '1p' "$CONFIG_DIR/port")
@@ -28,7 +38,9 @@ if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
   exit 1
 fi
 
-if [ "${MARIAN_MLX_CORS_ORIGIN+x}" = x ]; then
+if [ "${MARIAN_EDGE_CORS_ORIGIN+x}" = x ]; then
+  CORS_ORIGIN=$MARIAN_EDGE_CORS_ORIGIN
+elif [ "${MARIAN_MLX_CORS_ORIGIN+x}" = x ]; then
   CORS_ORIGIN=$MARIAN_MLX_CORS_ORIGIN
 elif [ -f "$CONFIG_DIR/cors-origin" ]; then
   CORS_ORIGIN=$(sed -n '1p' "$CONFIG_DIR/cors-origin")
@@ -37,7 +49,7 @@ else
 fi
 
 usage() {
-  echo "usage: marian-mlxctl {status|logs|restart|stop|start|verify|rollback|update|uninstall [--purge]}"
+  echo "usage: marian-edgectl {status|logs|restart|stop|start|verify|rollback|update|uninstall [--purge]}"
 }
 
 is_loaded() {
@@ -287,14 +299,14 @@ release_uses_legacy_mlx() {
 release_is_valid() {
   release=$1
   if [ ! -d "$release" ] ||
-     [ ! -x "$release/marian-mlx-server" ] ||
-     [ -L "$release/marian-mlx-server" ] ||
+     [ ! -x "$release/marian-edge-server" ] ||
+     [ -L "$release/marian-edge-server" ] ||
      [ ! -f "$release/SHA256SUMS" ]; then
     return 1
   fi
   if ! (cd "$release" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) ||
-     ! file "$release/marian-mlx-server" | grep -q arm64 ||
-     ! codesign --verify --strict "$release/marian-mlx-server" >/dev/null 2>&1; then
+     ! file "$release/marian-edge-server" | grep -q arm64 ||
+     ! codesign --verify --strict "$release/marian-edge-server" >/dev/null 2>&1; then
     return 1
   fi
 
@@ -309,8 +321,8 @@ release_is_valid() {
 
 configure_plist_for_release() {
   release=$1
-  template="$release/packaging/launchd/io.github.malusama.marian-mlx.plist"
-  plist_new="$PLIST.marian-mlxctl.$$"
+  template="$release/packaging/launchd/io.github.malusama.marian-edge.plist"
+  plist_new="$PLIST.marian-edgectl.$$"
   rm -f "$plist_new"
   if [ ! -f "$template" ] || [ -L "$template" ]; then
     return 1
@@ -322,7 +334,7 @@ configure_plist_for_release() {
   sed_replacement() {
     printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
   }
-  program=$(sed_replacement "$(xml_escape "$BASE/current/marian-mlx-server")")
+  program=$(sed_replacement "$(xml_escape "$BASE/current/marian-edge-server")")
   model_dir=$(sed_replacement "$(xml_escape "$BASE/models/en-zh")")
   stdout=$(sed_replacement "$(xml_escape "$STATE/server.log")")
   stderr=$(sed_replacement "$(xml_escape "$STATE/server.error.log")")
@@ -442,7 +454,7 @@ case "${1:-}" in
     rollback_to_legacy
     ;;
   update)
-    TMP=$(mktemp -d "${TMPDIR:-/tmp}/marian-mlx-update.XXXXXX")
+    TMP=$(mktemp -d "${TMPDIR:-/tmp}/marian-edge-update.XXXXXX")
     trap 'rm -rf "$TMP"' EXIT HUP INT TERM
     if [ "$REQUESTED_VERSION" = latest ]; then
       RELEASE_BASE="https://github.com/$REPOSITORY/releases/latest/download"
@@ -471,21 +483,21 @@ case "${1:-}" in
       load_legacy_rollback
       UPDATE_LEGACY_LABEL=$LEGACY_LABEL
     fi
-    MARIAN_MLX_REPOSITORY="$REPOSITORY" \
-    MARIAN_MLX_VERSION="$REQUESTED_VERSION" \
-    MARIAN_MLX_HOME="$BASE" \
-    MARIAN_MLX_STATE="$STATE" \
-    MARIAN_MLX_BIN_DIR="$BIN_DIR" \
-    MARIAN_MLX_PORT="$PORT" \
-    MARIAN_MLX_CORS_ORIGIN="$CORS_ORIGIN" \
-    MARIAN_MLX_LEGACY_LABEL="$UPDATE_LEGACY_LABEL" \
+    MARIAN_EDGE_REPOSITORY="$REPOSITORY" \
+    MARIAN_EDGE_VERSION="$REQUESTED_VERSION" \
+    MARIAN_EDGE_HOME="$BASE" \
+    MARIAN_EDGE_STATE="$STATE" \
+    MARIAN_EDGE_BIN_DIR="$BIN_DIR" \
+    MARIAN_EDGE_PORT="$PORT" \
+    MARIAN_EDGE_CORS_ORIGIN="$CORS_ORIGIN" \
+    MARIAN_EDGE_LEGACY_LABEL="$UPDATE_LEGACY_LABEL" \
       sh "$TMP/install-macos.sh"
     ;;
   uninstall)
     shift
-    export MARIAN_MLX_HOME="$BASE"
-    export MARIAN_MLX_STATE="$STATE"
-    export MARIAN_MLX_BIN_DIR="$BIN_DIR"
+    export MARIAN_EDGE_HOME="$BASE"
+    export MARIAN_EDGE_STATE="$STATE"
+    export MARIAN_EDGE_BIN_DIR="$BIN_DIR"
     exec "$BASE/uninstall-macos.sh" "$@"
     ;;
   *) usage; exit 2 ;;

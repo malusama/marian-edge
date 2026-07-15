@@ -1,12 +1,12 @@
 #!/bin/sh
 set -eu
 
-MODEL_DIR=${MARIAN_MLX_MODEL_DIR:-/models/en-zh}
+MODEL_DIR=${MARIAN_EDGE_MODEL_DIR:-/models/en-zh}
 BASE_URL=https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g/exported
 mkdir -p "$MODEL_DIR"
 exec 9>"$MODEL_DIR/.prepare.lock"
 flock -x -w 1800 9 || {
-  echo "marian-mlx: timed out waiting for the model preparation lock" >&2
+  echo "marian-edge: timed out waiting for the model preparation lock" >&2
   exit 1
 }
 rm -f "$MODEL_DIR/bergamot.yml" "$MODEL_DIR/bergamot.yml.part"
@@ -27,19 +27,19 @@ download_gzip() {
     return
   fi
   rm -f "$destination" "$destination.part" "$destination.gz.part"
-  echo "marian-mlx: downloading Mozilla model artifact $remote"
+  echo "marian-edge: downloading Mozilla model artifact $remote"
   curl --fail --location --retry 4 --retry-all-errors \
     --connect-timeout 15 --speed-limit 1024 --speed-time 60 --max-time 1800 \
     --output "$destination.gz.part" "$BASE_URL/$remote"
   verify "$gzip_hash" "$destination.gz.part" || {
     rm -f "$destination.gz.part"
-    echo "marian-mlx: checksum mismatch for $remote" >&2
+    echo "marian-edge: checksum mismatch for $remote" >&2
     exit 1
   }
   gzip -dc "$destination.gz.part" > "$destination.part"
   verify "$output_hash" "$destination.part" || {
     rm -f "$destination.part" "$destination.gz.part"
-    echo "marian-mlx: uncompressed checksum mismatch for $remote" >&2
+    echo "marian-edge: uncompressed checksum mismatch for $remote" >&2
     exit 1
   }
   mv "$destination.part" "$destination"

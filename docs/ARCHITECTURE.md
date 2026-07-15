@@ -67,9 +67,9 @@ floors belong in Metal tuning, never in core scheduling.
 
 The Rust package and source directory are both `marian-metal` and
 `crates/marian-metal`. The repository, installed executable, archive, service,
-metrics, and `MARIAN_MLX_*` environment contract retain the Marian MLX name for
-deployment compatibility. The `mlx` Cargo feature and CLI backend value remain
-aliases for direct Metal; they do not link the MLX runtime.
+metrics, and canonical `MARIAN_EDGE_*` environment contract use the Marian Edge
+name. The historical `MARIAN_MLX_*` runtime settings, `mlx` Cargo feature, and
+CLI backend value remain migration aliases; they do not link the MLX runtime.
 
 ## Model boundary
 
@@ -164,7 +164,7 @@ storage, and records MPS and embedded MSL commands. Fast math is disabled when
 the MSL source is compiled at startup.
 
 FP32 is the default precision contract. The explicit
-`MARIAN_MLX_METAL_PRECISION=mixed-f16` mode stores uploaded model weights in
+`MARIAN_EDGE_METAL_PRECISION=mixed-f16` mode stores uploaded model weights in
 FP16 while retaining FP32 activations and reductions; `/info` reports the
 selected precision.
 
@@ -217,11 +217,11 @@ arena buffer across requests while keeping stable model views reusable.
 
 `MetalTuning` is resolved once after device selection and centralizes attention,
 GEMM, decode-submission, and duplicate-row policy. Auto detection selects an
-M1, M2, M3, M4, or generic profile; `MARIAN_MLX_METAL_PROFILE` can override it
+M1, M2, M3, M4, or generic profile; `MARIAN_EDGE_METAL_PROFILE` can override it
 for controlled qualification. `/info` includes the active profile with the
 attention label.
 
-`MARIAN_MLX_METAL_*` is the canonical tuning namespace, consistent with the
+`MARIAN_EDGE_METAL_*` is the canonical tuning namespace, consistent with the
 rest of the installed product. `MARIAN_EDGE_METAL_*` is accepted as an alias;
 setting both names to different values fails closed instead of choosing one
 silently.

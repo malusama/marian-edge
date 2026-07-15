@@ -1,14 +1,14 @@
 services:
-  marian-mlx:
-    image: "${MARIAN_MLX_IMAGE:-ghcr.io/malusama/marian-mlx:cpu}"
+  marian-edge:
+    image: "${MARIAN_EDGE_IMAGE:-ghcr.io/malusama/marian-edge:cpu}"
     build:
       context: .
     ports:
-      - "127.0.0.1:${MARIAN_MLX_HOST_PORT:-3000}:3000"
+      - "127.0.0.1:${MARIAN_EDGE_HOST_PORT:-3000}:3000"
     environment:
-      MARIAN_MLX_CPU_THREADS: "${MARIAN_MLX_CPU_THREADS:-1}"
+      MARIAN_EDGE_CPU_THREADS: "${MARIAN_EDGE_CPU_THREADS:-1}"
     volumes:
-      - marian-mlx-models:/models
+      - marian-edge-models:/models
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -25,4 +25,4 @@ services:
       retries: 6
 
 volumes:
-  marian-mlx-models:
+  marian-edge-models:

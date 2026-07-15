@@ -1,14 +1,14 @@
 # Immersive Translate setup
 
-Marian MLX implements Immersive Translate's Custom API at `/imme`. Readiness,
+Marian Edge implements Immersive Translate's Custom API at `/imme`. Readiness,
 identity, translation, and extension URLs must all share one service origin:
 only the path changes.
 
 | Deployment | Service listener | Client service origin | Change the client port |
 |---|---|---|---|
-| native macOS installer | `127.0.0.1:3000` by default | `http://127.0.0.1:3000` | install with `MARIAN_MLX_PORT=3100`; use 3100 everywhere afterward |
-| native source build | `127.0.0.1:3000` by default | `http://127.0.0.1:3000` | use `--bind 127.0.0.1:3100` or `MARIAN_MLX_BIND=127.0.0.1:3100` |
-| Docker Compose | container `0.0.0.0:3000`; host loopback 3000 by default | `http://127.0.0.1:3000` | use `MARIAN_MLX_HOST_PORT=3100`; the container remains on 3000 |
+| native macOS installer | `127.0.0.1:3000` by default | `http://127.0.0.1:3000` | install with `MARIAN_EDGE_PORT=3100`; use 3100 everywhere afterward |
+| native source build | `127.0.0.1:3000` by default | `http://127.0.0.1:3000` | use `--bind 127.0.0.1:3100` or `MARIAN_EDGE_BIND=127.0.0.1:3100` |
+| Docker Compose | container `0.0.0.0:3000`; host loopback 3000 by default | `http://127.0.0.1:3000` | use `MARIAN_EDGE_HOST_PORT=3100`; the container remains on 3000 |
 | direct Docker | container `0.0.0.0:3000` | chosen host mapping | publish `127.0.0.1:3100:3000`; use host port 3100 |
 
 For example, this complete native setup uses port 3100 consistently:
@@ -16,8 +16,8 @@ For example, this complete native setup uses port 3100 consistently:
 ```sh
 PORT=3100
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.6.0 MARIAN_MLX_PORT="$PORT" sh
+  https://raw.githubusercontent.com/malusama/marian-edge/v0.7.0/scripts/install-macos.sh | \
+  MARIAN_EDGE_VERSION=v0.7.0 MARIAN_EDGE_PORT="$PORT" sh
 
 SERVICE_ORIGIN="http://127.0.0.1:$PORT"
 curl -fsS "$SERVICE_ORIGIN/readyz"
@@ -28,7 +28,7 @@ curl -fsS "$SERVICE_ORIGIN/info"
 The equivalent Compose setup is:
 
 ```sh
-MARIAN_MLX_HOST_PORT=3100 docker compose up -d
+MARIAN_EDGE_HOST_PORT=3100 docker compose up -d
 curl -fsS http://127.0.0.1:3100/readyz
 # Enter http://127.0.0.1:3100/imme in Immersive Translate.
 ```
@@ -109,7 +109,7 @@ translation-quality or Q8 claim.
 
 CORS is disabled by default. Extension host permissions are usually enough for
 loopback access. If the extension explicitly reports a CORS failure, configure
-its exact trusted origin with `MARIAN_MLX_CORS_ORIGIN`. Use `*` only for a
+its exact trusted origin with `MARIAN_EDGE_CORS_ORIGIN`. Use `*` only for a
 personal service that remains bound and published on loopback.
 
 When CORS is enabled, the server allows GET, POST, and the `Content-Type`
@@ -119,9 +119,9 @@ the previously saved port:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.6.0 \
-  MARIAN_MLX_CORS_ORIGIN='chrome-extension://TRUSTED_EXTENSION_ID' sh
+  https://raw.githubusercontent.com/malusama/marian-edge/v0.7.0/scripts/install-macos.sh | \
+  MARIAN_EDGE_VERSION=v0.7.0 \
+  MARIAN_EDGE_CORS_ORIGIN='chrome-extension://TRUSTED_EXTENSION_ID' sh
 ```
 
 ## Troubleshooting

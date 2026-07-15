@@ -13,8 +13,8 @@ WORKSPACE_VERSION=$(awk '
 ' "$ROOT/Cargo.toml")
 VERSION=${VERSION:-$WORKSPACE_VERSION}
 DIST=${1:-"$ROOT/dist"}
-BUNDLE="$DIST/marian-mlx-v$VERSION-macos-arm64"
-ARCHIVE="$DIST/marian-mlx-macos-arm64.tar.gz"
+BUNDLE="$DIST/marian-edge-v$VERSION-macos-arm64"
+ARCHIVE="$DIST/marian-edge-macos-arm64.tar.gz"
 
 printf '%s\n' "$VERSION" | grep -Eq \
   '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z][0-9A-Za-z.-]*)?$' || {
@@ -26,25 +26,25 @@ printf '%s\n' "$VERSION" | grep -Eq \
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/scripts" "$BUNDLE/tools" \
   "$BUNDLE/packaging/launchd"
-install -m 0755 "$ROOT/target/release/marian-mlx-server" "$BUNDLE/marian-mlx-server"
+install -m 0755 "$ROOT/target/release/marian-edge-server" "$BUNDLE/marian-edge-server"
 install -m 0755 "$ROOT/scripts/prepare-enzh-model.sh" "$BUNDLE/scripts/prepare-enzh-model.sh"
-install -m 0755 "$ROOT/scripts/marian-mlxctl" "$BUNDLE/scripts/marian-mlxctl"
+install -m 0755 "$ROOT/scripts/marian-edgectl" "$BUNDLE/scripts/marian-edgectl"
 install -m 0755 "$ROOT/scripts/uninstall-macos.sh" "$BUNDLE/scripts/uninstall-macos.sh"
 install -m 0755 "$ROOT/tools/convert_marian.py" "$BUNDLE/tools/convert_marian.py"
 install -m 0644 \
-  "$ROOT/packaging/launchd/io.github.malusama.marian-mlx.plist" \
-  "$BUNDLE/packaging/launchd/io.github.malusama.marian-mlx.plist"
+  "$ROOT/packaging/launchd/io.github.malusama.marian-edge.plist" \
+  "$BUNDLE/packaging/launchd/io.github.malusama.marian-edge.plist"
 install -m 0644 "$ROOT/LICENSE" "$BUNDLE/LICENSE"
 install -m 0644 "$ROOT/LICENSE-APACHE-2.0" "$BUNDLE/LICENSE-APACHE-2.0"
 install -m 0644 "$ROOT/THIRD_PARTY_NOTICES.md" "$BUNDLE/THIRD_PARTY_NOTICES.md"
 printf '%s\n' "$VERSION" > "$BUNDLE/VERSION"
 
-if [ "$(file -b "$BUNDLE/marian-mlx-server")" = "" ] || \
-   ! file "$BUNDLE/marian-mlx-server" | grep -q 'arm64'; then
+if [ "$(file -b "$BUNDLE/marian-edge-server")" = "" ] || \
+   ! file "$BUNDLE/marian-edge-server" | grep -q 'arm64'; then
   echo "release executable is not arm64" >&2
   exit 1
 fi
-DYNAMIC_DEPENDENCIES=$(otool -L "$BUNDLE/marian-mlx-server" | awk 'NR > 1 {print $1}')
+DYNAMIC_DEPENDENCIES=$(otool -L "$BUNDLE/marian-edge-server" | awk 'NR > 1 {print $1}')
 if printf '%s\n' "$DYNAMIC_DEPENDENCIES" | \
    grep -Ev '^(/usr/lib/|/System/Library/)' | grep -q .; then
   echo "release executable has a non-system dynamic dependency" >&2
@@ -68,9 +68,9 @@ fi
 
 # CI uses ad-hoc signing. Release builders may provide a Developer ID identity.
 CODESIGN_IDENTITY=${CODESIGN_IDENTITY:--}
-codesign --force --sign "$CODESIGN_IDENTITY" "$BUNDLE/marian-mlx-server"
-codesign --verify --strict "$BUNDLE/marian-mlx-server"
-if strings "$BUNDLE/marian-mlx-server" | grep -E '/Users/|/home/runner/' >/dev/null; then
+codesign --force --sign "$CODESIGN_IDENTITY" "$BUNDLE/marian-edge-server"
+codesign --verify --strict "$BUNDLE/marian-edge-server"
+if strings "$BUNDLE/marian-edge-server" | grep -E '/Users/|/home/runner/' >/dev/null; then
   echo "release bundle contains a developer-machine path" >&2
   exit 1
 fi

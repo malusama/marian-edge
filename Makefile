@@ -3,7 +3,7 @@
 .PHONY: help fmt lint test docs-check check build-macos model package docker-build docker-up
 
 help: ## Show common developer commands
-	@awk 'BEGIN {FS = ":.*## "; print "Marian MLX developer commands:"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "; print "Marian Edge developer commands:"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 fmt: ## Format Rust source
 	cargo fmt --all
@@ -37,7 +37,7 @@ package: ## Create the native macOS release archive
 	scripts/package-macos.sh
 
 docker-build: ## Build the CPU-only Docker image for the host architecture
-	docker build --tag marian-mlx:cpu .
+	docker build --tag marian-edge:cpu .
 
 docker-up: ## Start the CPU-only service with Docker Compose
 	docker compose up --detach

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>io.github.malusama.marian-mlx</string>
+  <string>io.github.malusama.marian-edge</string>
   <key>ProgramArguments</key>
   <array>
     <string>@PROGRAM@</string>

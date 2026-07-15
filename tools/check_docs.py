@@ -71,21 +71,21 @@ def check_release_references(checks: Checks, version: str) -> None:
         pinned_blocks = [
             block
             for block in blocks
-            if "raw.githubusercontent.com/malusama/marian-mlx/v" in block
+            if "raw.githubusercontent.com/malusama/marian-edge/v" in block
             and "/scripts/install-macos.sh" in block
         ]
         checks.require(
             any(
                 f"/v{version}/scripts/install-macos.sh" in block
-                and f"MARIAN_MLX_VERSION=v{version}" in block
+                and f"MARIAN_EDGE_VERSION=v{version}" in block
                 for block in pinned_blocks
             ),
             f"{relative_path}: pinned installer block must use v{version} in both "
-            "the download URL and MARIAN_MLX_VERSION",
+            "the download URL and MARIAN_EDGE_VERSION",
         )
         installer_versions = set(
             re.findall(
-                r"raw\.githubusercontent\.com/malusama/marian-mlx/v"
+                r"raw\.githubusercontent\.com/malusama/marian-edge/v"
                 r"(\d+\.\d+\.\d+)/scripts/install-macos\.sh",
                 text,
             )
@@ -96,16 +96,16 @@ def check_release_references(checks: Checks, version: str) -> None:
             f"{sorted(installer_versions)!r}; expected only {version}",
         )
         environment_versions = set(
-            re.findall(r"MARIAN_MLX_VERSION=v(\d+\.\d+\.\d+)", text)
+            re.findall(r"MARIAN_EDGE_VERSION=v(\d+\.\d+\.\d+)", text)
         )
         checks.require(
             environment_versions == {version},
-            f"{relative_path}: MARIAN_MLX_VERSION values are "
+            f"{relative_path}: MARIAN_EDGE_VERSION values are "
             f"{sorted(environment_versions)!r}; expected only {version}",
         )
         image_versions = set(
             re.findall(
-                r"ghcr\.io/malusama/marian-mlx:cpu-(\d+\.\d+\.\d+)", text
+                r"ghcr\.io/malusama/marian-edge:cpu-(\d+\.\d+\.\d+)", text
             )
         )
         checks.require(
@@ -119,17 +119,17 @@ def check_release_references(checks: Checks, version: str) -> None:
         references = {
             "pinned installer URL": set(
                 re.findall(
-                    r"raw\.githubusercontent\.com/malusama/marian-mlx/v"
+                    r"raw\.githubusercontent\.com/malusama/marian-edge/v"
                     r"(\d+\.\d+\.\d+)/scripts/install-macos\.sh",
                     text,
                 )
             ),
-            "MARIAN_MLX_VERSION": set(
-                re.findall(r"MARIAN_MLX_VERSION=v(\d+\.\d+\.\d+)", text)
+            "MARIAN_EDGE_VERSION": set(
+                re.findall(r"MARIAN_EDGE_VERSION=v(\d+\.\d+\.\d+)", text)
             ),
             "versioned CPU image": set(
                 re.findall(
-                    r"ghcr\.io/malusama/marian-mlx:cpu-(\d+\.\d+\.\d+)",
+                    r"ghcr\.io/malusama/marian-edge:cpu-(\d+\.\d+\.\d+)",
                     text,
                 )
             ),
@@ -152,7 +152,7 @@ def check_release_references(checks: Checks, version: str) -> None:
     )
     checks.require(
         re.search(
-            rf"(?m)^\[Unreleased\]: https://github\.com/malusama/marian-mlx/"
+            rf"(?m)^\[Unreleased\]: https://github\.com/malusama/marian-edge/"
             rf"compare/v{version_re}\.\.\.HEAD\s*$",
             changelog,
         )
@@ -161,7 +161,7 @@ def check_release_references(checks: Checks, version: str) -> None:
     )
     checks.require(
         re.search(
-            rf"(?m)^\[{version_re}\]: https://github\.com/malusama/marian-mlx/"
+            rf"(?m)^\[{version_re}\]: https://github\.com/malusama/marian-edge/"
             rf"compare/v\d+\.\d+\.\d+\.\.\.v{version_re}\s*$",
             changelog,
         )
@@ -303,12 +303,12 @@ def check_deployment_ports(checks: Checks) -> None:
     server = checks.text("crates/marian-server/src/main.rs")
     checks.require(
         re.search(
-            r'MARIAN_MLX_BIND"[^\]]*default_value\s*=\s*"127\.0\.0\.1:3000"',
+            r'MARIAN_EDGE_BIND"[^\]]*default_value\s*=\s*"127\.0\.0\.1:3000"',
             server,
             re.DOTALL,
         )
         is not None,
-        "crates/marian-server/src/main.rs: MARIAN_MLX_BIND must default to "
+        "crates/marian-server/src/main.rs: MARIAN_EDGE_BIND must default to "
         "127.0.0.1:3000",
     )
 
@@ -324,7 +324,7 @@ def check_deployment_ports(checks: Checks) -> None:
 
     dockerfile = checks.text("Dockerfile")
     for expected, description in (
-        ("MARIAN_MLX_BIND=0.0.0.0:3000", "container bind"),
+        ("MARIAN_EDGE_BIND=0.0.0.0:3000", "container bind"),
         ("EXPOSE 3000", "exposed port"),
         ("http://127.0.0.1:3000/readyz", "healthcheck URL"),
     ):
@@ -334,7 +334,7 @@ def check_deployment_ports(checks: Checks) -> None:
         )
 
     compose = checks.text("compose.yaml")
-    expected_mapping = '"127.0.0.1:${MARIAN_MLX_HOST_PORT:-3000}:3000"'
+    expected_mapping = '"127.0.0.1:${MARIAN_EDGE_HOST_PORT:-3000}:3000"'
     checks.require(
         expected_mapping in compose,
         "compose.yaml: ports must contain " + expected_mapping,
@@ -344,8 +344,8 @@ def check_deployment_ports(checks: Checks) -> None:
         "compose.yaml: container healthcheck must use 127.0.0.1:3000/readyz",
     )
     checks.require(
-        '"${MARIAN_MLX_IMAGE:-ghcr.io/malusama/marian-mlx:cpu}"' in compose,
-        "compose.yaml: image must be overrideable through MARIAN_MLX_IMAGE",
+        '"${MARIAN_EDGE_IMAGE:-ghcr.io/malusama/marian-edge:cpu}"' in compose,
+        "compose.yaml: image must be overrideable through MARIAN_EDGE_IMAGE",
     )
 
 
@@ -356,11 +356,11 @@ def check_custom_port_contract(checks: Checks) -> None:
             block
             for block in fenced_code_blocks(text)
             if (
-                "MARIAN_MLX_PORT=3100" in block
+                "MARIAN_EDGE_PORT=3100" in block
                 or (
                     re.search(r"(?m)^\s*PORT=3100\s*$", block) is not None
                     and re.search(
-                        r'MARIAN_MLX_PORT=(?:"\$PORT"|\$PORT)(?![A-Za-z0-9_])',
+                        r'MARIAN_EDGE_PORT=(?:"\$PORT"|\$PORT)(?![A-Za-z0-9_])',
                         block,
                     )
                     is not None
@@ -393,7 +393,7 @@ def check_custom_port_contract(checks: Checks) -> None:
         compose_blocks = [
             block
             for block in fenced_code_blocks(text)
-            if "MARIAN_MLX_HOST_PORT=3100" in block
+            if "MARIAN_EDGE_HOST_PORT=3100" in block
         ]
         checks.require(
             any(
@@ -546,20 +546,20 @@ def check_controller_lifecycle(checks: Checks) -> None:
         "update",
         "uninstall",
     }
-    controller = checks.text("scripts/marian-mlxctl")
+    controller = checks.text("scripts/marian-edgectl")
     commands = set(re.findall(r"(?m)^  ([a-z][a-z-]*)\)\s*$", controller))
     checks.require(
         expected <= commands,
-        "scripts/marian-mlxctl: expected lifecycle commands are missing: "
+        "scripts/marian-edgectl: expected lifecycle commands are missing: "
         + ", ".join(sorted(expected - commands)),
     )
     for relative_path in (*README_PATHS, Path("docs/OPERATIONS.md")):
         document = checks.text(relative_path)
         for command in expected:
             checks.require(
-                f"marian-mlxctl {command}" in document,
+                f"marian-edgectl {command}" in document,
                 f"{relative_path}: installed-service lifecycle omits "
-                f"'marian-mlxctl {command}'",
+                f"'marian-edgectl {command}'",
             )
 
 
@@ -584,8 +584,11 @@ def check_architecture_contracts(checks: Checks, version: str) -> None:
     ):
         document = checks.text(relative_path)
         checks.require(
-            "-p marian-mlx" not in document and "`marian-mlx`" not in document,
-            f"{relative_path}: stale internal marian-mlx Cargo package name",
+            "-p marian-mlx" not in document
+            and "-p marian-edge" not in document
+            and "`marian-mlx`" not in document
+            and "`marian-edge`" not in document,
+            f"{relative_path}: product name used as an internal Cargo package",
         )
 
     manifest = checks.text("crates/marian-model/src/manifest.rs")
@@ -612,7 +615,7 @@ def check_architecture_contracts(checks: Checks, version: str) -> None:
         in checks.text("scripts/prepare-enzh-model.sh"),
         "scripts/prepare-enzh-model.sh: converted manifest must use canonical format",
     )
-    for relative_path in ("scripts/install-macos.sh", "scripts/marian-mlxctl"):
+    for relative_path in ("scripts/install-macos.sh", "scripts/marian-edgectl"):
         script = checks.text(relative_path)
         checks.require(
             "(marian-edge|marian-mlx)\\.transformer-ssru\\.v1" in script,
@@ -637,10 +640,10 @@ def check_architecture_contracts(checks: Checks, version: str) -> None:
 
     metal_config = checks.text("crates/marian-metal/src/config.rs")
     checks.require(
-        'format!("MARIAN_MLX_{suffix}")' in metal_config
-        and 'format!("MARIAN_EDGE_{suffix}")' in metal_config
+        'format!("MARIAN_EDGE_{suffix}")' in metal_config
+        and 'format!("MARIAN_MLX_{suffix}")' in metal_config
         and "conflicting settings" in metal_config,
-        "Metal tuning must keep MARIAN_MLX canonical, accept MARIAN_EDGE alias, "
+        "Metal tuning must keep MARIAN_EDGE canonical, accept MARIAN_MLX alias, "
         "and reject conflicts",
     )
 

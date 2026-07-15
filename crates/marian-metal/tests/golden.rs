@@ -8,7 +8,8 @@ use marian_metal::MetalBackend;
 #[test]
 #[ignore = "requires converted Mozilla en-zh weights and an Apple GPU"]
 fn matches_known_sentences() {
-    let model_dir = std::env::var_os("MARIAN_MLX_MODEL_DIR")
+    let model_dir = std::env::var_os("MARIAN_EDGE_MODEL_DIR")
+        .or_else(|| std::env::var_os("MARIAN_MLX_MODEL_DIR"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("../../models/enzh"));
     let mut backend = MetalBackend::load(model_dir).unwrap();

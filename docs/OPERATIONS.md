@@ -3,15 +3,15 @@
 ## Native macOS service
 
 The installer creates the per-user LaunchAgent
-`io.github.malusama.marian-mlx`, binds it to `127.0.0.1:3000` by default, and
-stores data under `~/.local/share/marian-mlx`. A custom
-`MARIAN_MLX_PORT=3100` is persisted, so operational checks must read the saved
+`io.github.malusama.marian-edge`, binds it to `127.0.0.1:3000` by default, and
+stores data under `~/.local/share/marian-edge`. A custom
+`MARIAN_EDGE_PORT=3100` is persisted, so operational checks must read the saved
 port instead of assuming 3000:
 
 ```sh
-MARIAN_MLX_HOME=${MARIAN_MLX_HOME:-"$HOME/.local/share/marian-mlx"}
-if [ -r "$MARIAN_MLX_HOME/config/port" ]; then
-  PORT=$(sed -n '1p' "$MARIAN_MLX_HOME/config/port")
+MARIAN_EDGE_HOME=${MARIAN_EDGE_HOME:-"$HOME/.local/share/marian-edge"}
+if [ -r "$MARIAN_EDGE_HOME/config/port" ]; then
+  PORT=$(sed -n '1p' "$MARIAN_EDGE_HOME/config/port")
 else
   PORT=3000
 fi
@@ -26,22 +26,28 @@ and compiled through the system Metal framework when the process starts; there
 is no adjacent `libmlx.dylib` or `.metallib` to install or verify. The model
 directory is managed separately.
 
+For an upgrade from `marian-mlx`, the installer discovers the historical data
+and state directories when the new locations do not exist, treats
+`io.github.malusama.marian-mlx` as the previous service, and archives that
+LaunchAgent only after Marian Edge passes readiness. The old `MARIAN_MLX_*`
+settings and `marian-mlxctl` command remain migration aliases.
+
 ### Installed-service lifecycle
 
-`marian-mlxctl` is the supported operator interface; a source checkout is not
+`marian-edgectl` is the supported operator interface; a source checkout is not
 required:
 
 ```sh
-~/.local/bin/marian-mlxctl status
-~/.local/bin/marian-mlxctl verify
-~/.local/bin/marian-mlxctl logs
-~/.local/bin/marian-mlxctl restart
-~/.local/bin/marian-mlxctl stop
-~/.local/bin/marian-mlxctl start
-~/.local/bin/marian-mlxctl update
-~/.local/bin/marian-mlxctl rollback
-~/.local/bin/marian-mlxctl uninstall
-~/.local/bin/marian-mlxctl uninstall --purge
+~/.local/bin/marian-edgectl status
+~/.local/bin/marian-edgectl verify
+~/.local/bin/marian-edgectl logs
+~/.local/bin/marian-edgectl restart
+~/.local/bin/marian-edgectl stop
+~/.local/bin/marian-edgectl start
+~/.local/bin/marian-edgectl update
+~/.local/bin/marian-edgectl rollback
+~/.local/bin/marian-edgectl uninstall
+~/.local/bin/marian-edgectl uninstall --purge
 ```
 
 `update` downloads and verifies the next release before stopping the current
@@ -55,25 +61,25 @@ If installation used custom locations, export the same values for every
 controller invocation and call the controller from that bin directory:
 
 ```sh
-export MARIAN_MLX_HOME=/absolute/path/to/marian-mlx
-export MARIAN_MLX_STATE=/absolute/path/to/marian-mlx-state
-export MARIAN_MLX_BIN_DIR=/absolute/path/to/bin
-"$MARIAN_MLX_BIN_DIR/marian-mlxctl" verify
+export MARIAN_EDGE_HOME=/absolute/path/to/marian-edge
+export MARIAN_EDGE_STATE=/absolute/path/to/marian-edge-state
+export MARIAN_EDGE_BIN_DIR=/absolute/path/to/bin
+"$MARIAN_EDGE_BIN_DIR/marian-edgectl" verify
 ```
 
 The raw `launchctl` equivalents are useful for diagnosis, not normal lifecycle
 management:
 
 ```sh
-launchctl print "gui/$(id -u)/io.github.malusama.marian-mlx"
-MARIAN_MLX_STATE=${MARIAN_MLX_STATE:-"$HOME/.local/state/marian-mlx"}
-tail -f "$MARIAN_MLX_STATE/server.log" \
-  "$MARIAN_MLX_STATE/server.error.log"
+launchctl print "gui/$(id -u)/io.github.malusama.marian-edge"
+MARIAN_EDGE_STATE=${MARIAN_EDGE_STATE:-"$HOME/.local/state/marian-edge"}
+tail -f "$MARIAN_EDGE_STATE/server.log" \
+  "$MARIAN_EDGE_STATE/server.error.log"
 ```
 
 Repository scripts such as `scripts/install-macos.sh` are contributor entry
 points when working from a source checkout. Installed users should use
-`marian-mlxctl`.
+`marian-edgectl`.
 
 ### Production profile and controlled A/B
 
@@ -91,18 +97,18 @@ installed service:
 
 | Environment variable | M1 production value | Valid values / purpose |
 |---|---:|---|
-| `MARIAN_MLX_METAL_PRECISION` | `fp32` | `fp32` or explicit `mixed-f16` storage |
-| `MARIAN_MLX_METAL_PROFILE` | `auto` -> `m1` | `auto`, `m1`, `m2`, `m3`, `m4`, `generic` |
-| `MARIAN_MLX_METAL_ATTENTION` | `auto` | `auto`, `classic`, `flash` |
-| `MARIAN_MLX_METAL_FLASH_THRESHOLD` | `1` | positive self-attention sequence threshold, maximum 4096 |
-| `MARIAN_MLX_METAL_FLASH_QUERY_TILE` | `4` | `1`, `2`, or `4` |
-| `MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH` | `9` | maximum physical occupancy width inside one dynamic batch |
-| `MARIAN_MLX_METAL_DECODE_ROW_BUDGET` | `54` | positive rows multiplied by steps per submission |
-| `MARIAN_MLX_METAL_DECODE_MAX_STEPS` | `6` | `1` through `8` |
-| `MARIAN_MLX_METAL_DECODE_SELECTION_THREADS` | `256` | `128`, `256`, or `512` |
-| `MARIAN_MLX_METAL_CUSTOM_GEMM_MAX_ROWS` | `0` | `0` disables custom FP32 GEMM; positive values set its row ceiling |
+| `MARIAN_EDGE_METAL_PRECISION` | `fp32` | `fp32` or explicit `mixed-f16` storage |
+| `MARIAN_EDGE_METAL_PROFILE` | `auto` -> `m1` | `auto`, `m1`, `m2`, `m3`, `m4`, `generic` |
+| `MARIAN_EDGE_METAL_ATTENTION` | `auto` | `auto`, `classic`, `flash` |
+| `MARIAN_EDGE_METAL_FLASH_THRESHOLD` | `1` | positive self-attention sequence threshold, maximum 4096 |
+| `MARIAN_EDGE_METAL_FLASH_QUERY_TILE` | `4` | `1`, `2`, or `4` |
+| `MARIAN_EDGE_METAL_DUPLICATE_BATCH_WIDTH` | `9` | maximum physical occupancy width inside one dynamic batch |
+| `MARIAN_EDGE_METAL_DECODE_ROW_BUDGET` | `54` | positive rows multiplied by steps per submission |
+| `MARIAN_EDGE_METAL_DECODE_MAX_STEPS` | `6` | `1` through `8` |
+| `MARIAN_EDGE_METAL_DECODE_SELECTION_THREADS` | `256` | `128`, `256`, or `512` |
+| `MARIAN_EDGE_METAL_CUSTOM_GEMM_MAX_ROWS` | `0` | `0` disables custom FP32 GEMM; positive values set its row ceiling |
 
-The product-level `MARIAN_MLX_METAL_*` names above are canonical.
+The product-level `MARIAN_EDGE_METAL_*` names above are canonical.
 `MARIAN_EDGE_METAL_*` spellings are accepted aliases for embedding use; if both
 forms are set to different values, startup fails rather than choosing one.
 
@@ -110,8 +116,8 @@ For example, leave the LaunchAgent on its saved port and run the foreground
 candidate on 3101:
 
 ```sh
-MARIAN_MLX_METAL_ATTENTION=classic \
-  target/release/marian-mlx-server \
+MARIAN_EDGE_METAL_ATTENTION=classic \
+  target/release/marian-edge-server \
   --backend metal --model-dir models/enzh --bind 127.0.0.1:3101
 # In another shell:
 curl -fsS http://127.0.0.1:3101/info
@@ -131,22 +137,22 @@ port and CORS; shell exports do not alter an already installed LaunchAgent.
 
 | Environment variable | Native default | Meaning |
 |---|---|---|
-| `MARIAN_MLX_BIND` | `127.0.0.1:3000` | complete listener address; container image overrides it to `0.0.0.0:3000` |
-| `MARIAN_MLX_BACKEND` | `auto` | `auto`, `metal`, `cpu`, or development-only `echo` |
-| `MARIAN_MLX_MODEL_DIR` | `models/enzh` | model directory; container image uses `/models/en-zh` |
-| `MARIAN_MLX_CPU_THREADS` | `1` | CPU inference threads: `1`, `2`, or `4` |
-| `MARIAN_MLX_QUEUE_CAPACITY` | `256` | bounded admission capacity |
-| `MARIAN_MLX_MAX_BATCH_SIZE` | `16` | maximum logical dynamic batch size |
-| `MARIAN_MLX_MAX_PADDED_SOURCE_CHARS` | `4096` | padded-character work bound for scheduler compatibility |
-| `MARIAN_MLX_BATCH_WINDOW_US` | `750` | micro-batch collection window in microseconds |
-| `MARIAN_MLX_REQUEST_TIMEOUT_MS` | `30000` | end-to-end scheduler timeout in milliseconds |
-| `MARIAN_MLX_CORS_ORIGIN` | unset | one exact origin or `*`; keep unset unless the client requires CORS |
-| `MARIAN_MLX_JSON_LOGS` | `false` | emit JSON rather than text tracing logs |
+| `MARIAN_EDGE_BIND` | `127.0.0.1:3000` | complete listener address; container image overrides it to `0.0.0.0:3000` |
+| `MARIAN_EDGE_BACKEND` | `auto` | `auto`, `metal`, `cpu`, or development-only `echo` |
+| `MARIAN_EDGE_MODEL_DIR` | `models/enzh` | model directory; container image uses `/models/en-zh` |
+| `MARIAN_EDGE_CPU_THREADS` | `1` | CPU inference threads: `1`, `2`, or `4` |
+| `MARIAN_EDGE_QUEUE_CAPACITY` | `256` | bounded admission capacity |
+| `MARIAN_EDGE_MAX_BATCH_SIZE` | `16` | maximum logical dynamic batch size |
+| `MARIAN_EDGE_MAX_PADDED_SOURCE_CHARS` | `4096` | padded-character work bound for scheduler compatibility |
+| `MARIAN_EDGE_BATCH_WINDOW_US` | `750` | micro-batch collection window in microseconds |
+| `MARIAN_EDGE_REQUEST_TIMEOUT_MS` | `30000` | end-to-end scheduler timeout in milliseconds |
+| `MARIAN_EDGE_CORS_ORIGIN` | unset | one exact origin or `*`; keep unset unless the client requires CORS |
+| `MARIAN_EDGE_JSON_LOGS` | `false` | emit JSON rather than text tracing logs |
 
 ## Docker CPU service
 
 The container listens on `0.0.0.0:3000` internally. The supported Compose file
-publishes it only to host loopback; `MARIAN_MLX_HOST_PORT` changes the host side
+publishes it only to host loopback; `MARIAN_EDGE_HOST_PORT` changes the host side
 without changing the container port:
 
 ```sh
@@ -161,7 +167,7 @@ docker compose down
 Custom host port:
 
 ```sh
-MARIAN_MLX_HOST_PORT=3100 docker compose up -d
+MARIAN_EDGE_HOST_PORT=3100 docker compose up -d
 curl -fsS http://127.0.0.1:3100/readyz
 curl -fsS http://127.0.0.1:3100/info
 # Immersive Translate: http://127.0.0.1:3100/imme
@@ -171,11 +177,11 @@ For a reproducible rollback, pin the immutable versioned image. Repeat the same
 variables on later Compose commands because shell assignments are not stored:
 
 ```sh
-MARIAN_MLX_IMAGE=ghcr.io/malusama/marian-mlx:cpu-0.6.0 \
-MARIAN_MLX_HOST_PORT=3100 \
+MARIAN_EDGE_IMAGE=ghcr.io/malusama/marian-edge:cpu-0.7.0 \
+MARIAN_EDGE_HOST_PORT=3100 \
   docker compose pull
-MARIAN_MLX_IMAGE=ghcr.io/malusama/marian-mlx:cpu-0.6.0 \
-MARIAN_MLX_HOST_PORT=3100 \
+MARIAN_EDGE_IMAGE=ghcr.io/malusama/marian-edge:cpu-0.7.0 \
+MARIAN_EDGE_HOST_PORT=3100 \
   docker compose up -d
 ```
 
@@ -188,7 +194,7 @@ container; use the native installer for Apple GPU inference.
 ### CPU ownership and compute threads
 
 The CPU model has one owner. Concurrent HTTP requests still benefit from the
-scheduler's micro-batching, and changing `MARIAN_MLX_CPU_THREADS` does not
+scheduler's micro-batching, and changing `MARIAN_EDGE_CPU_THREADS` does not
 create extra model replicas or workers. The setting accepts 1, 2, or 4 and is
 applied at startup to FP32 matrix multiplication and Q8 rten/exact-AVX2 row
 parallelism.
@@ -198,7 +204,7 @@ representative traffic, and compare throughput, tail latency, CPU utilization,
 and peak RSS:
 
 ```sh
-MARIAN_MLX_CPU_THREADS=2 docker compose up -d --force-recreate
+MARIAN_EDGE_CPU_THREADS=2 docker compose up -d --force-recreate
 docker stats
 ```
 

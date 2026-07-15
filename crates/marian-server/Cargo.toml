@@ -10,7 +10,7 @@ homepage.workspace = true
 build = "build.rs"
 
 [[bin]]
-name = "marian-mlx-server"
+name = "marian-edge-server"
 path = "src/main.rs"
 
 [features]

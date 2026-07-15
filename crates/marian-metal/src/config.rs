@@ -77,7 +77,7 @@ impl MetalConfig {
             "mixed-f16" => MetalPrecision::MixedF16,
             value => {
                 return Err(format!(
-                    "unsupported MARIAN_MLX_METAL_PRECISION {value:?}; expected fp32 or mixed-f16"
+                    "unsupported MARIAN_EDGE_METAL_PRECISION {value:?}; expected fp32 or mixed-f16"
                 ));
             }
         };
@@ -93,7 +93,7 @@ impl MetalConfig {
             "generic" => MetalProfile::Generic,
             value => {
                 return Err(format!(
-                    "unsupported MARIAN_MLX_METAL_PROFILE {value:?}; expected auto, m1, m2, m3, m4, or generic"
+                    "unsupported MARIAN_EDGE_METAL_PROFILE {value:?}; expected auto, m1, m2, m3, m4, or generic"
                 ));
             }
         };
@@ -106,31 +106,31 @@ impl MetalConfig {
             "flash" => MetalAttention::Flash,
             value => {
                 return Err(format!(
-                    "unsupported MARIAN_MLX_METAL_ATTENTION {value:?}; expected auto, classic, or flash"
+                    "unsupported MARIAN_EDGE_METAL_ATTENTION {value:?}; expected auto, classic, or flash"
                 ));
             }
         };
         let flash_threshold = positive_value("METAL_FLASH_THRESHOLD", &mut lookup)?.unwrap_or(1);
         if flash_threshold > MAXIMUM_POSITION {
             return Err(format!(
-                "MARIAN_MLX_METAL_FLASH_THRESHOLD must be between 1 and {MAXIMUM_POSITION}"
+                "MARIAN_EDGE_METAL_FLASH_THRESHOLD must be between 1 and {MAXIMUM_POSITION}"
             ));
         }
         let flash_query_tile = positive_value("METAL_FLASH_QUERY_TILE", &mut lookup)?;
         if flash_query_tile.is_some_and(|tile| !matches!(tile, 1 | 2 | 4)) {
-            return Err("MARIAN_MLX_METAL_FLASH_QUERY_TILE must be one of 1, 2, or 4".into());
+            return Err("MARIAN_EDGE_METAL_FLASH_QUERY_TILE must be one of 1, 2, or 4".into());
         }
         let duplicate_batch_width = positive_value("METAL_DUPLICATE_BATCH_WIDTH", &mut lookup)?;
         let decode_row_budget = positive_value("METAL_DECODE_ROW_BUDGET", &mut lookup)?;
         let decode_maximum_steps = positive_value("METAL_DECODE_MAX_STEPS", &mut lookup)?;
         if decode_maximum_steps.is_some_and(|steps| steps > 8) {
-            return Err("MARIAN_MLX_METAL_DECODE_MAX_STEPS must be between 1 and 8".into());
+            return Err("MARIAN_EDGE_METAL_DECODE_MAX_STEPS must be between 1 and 8".into());
         }
         let decode_selection_threads =
             positive_value("METAL_DECODE_SELECTION_THREADS", &mut lookup)?;
         if decode_selection_threads.is_some_and(|threads| !matches!(threads, 128 | 256 | 512)) {
             return Err(
-                "MARIAN_MLX_METAL_DECODE_SELECTION_THREADS must be 128, 256, or 512".into(),
+                "MARIAN_EDGE_METAL_DECODE_SELECTION_THREADS must be 128, 256, or 512".into(),
             );
         }
         let custom_gemm_maximum_rows =
@@ -157,7 +157,7 @@ fn positive_value(
     let Some(value) = setting(suffix, lookup)? else {
         return Ok(None);
     };
-    let name = format!("MARIAN_MLX_{suffix}");
+    let name = format!("MARIAN_EDGE_{suffix}");
     let parsed = value
         .parse::<usize>()
         .map_err(|_| format!("{name} {value:?} is not an integer"))?;
@@ -174,7 +174,7 @@ fn non_negative_value(
     let Some(value) = setting(suffix, lookup)? else {
         return Ok(None);
     };
-    let name = format!("MARIAN_MLX_{suffix}");
+    let name = format!("MARIAN_EDGE_{suffix}");
     value
         .parse::<usize>()
         .map(Some)
@@ -185,8 +185,8 @@ fn setting(
     suffix: &str,
     lookup: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<Option<String>, String> {
-    let primary_name = format!("MARIAN_MLX_{suffix}");
-    let alias_name = format!("MARIAN_EDGE_{suffix}");
+    let primary_name = format!("MARIAN_EDGE_{suffix}");
+    let alias_name = format!("MARIAN_MLX_{suffix}");
     let primary = lookup(&primary_name);
     let alias = lookup(&alias_name);
     match (primary, alias) {
@@ -217,16 +217,16 @@ mod tests {
     #[test]
     fn explicit_values_parse_without_mutating_process_environment() {
         let values = HashMap::from([
-            ("MARIAN_MLX_METAL_PRECISION", "mixed-f16"),
-            ("MARIAN_MLX_METAL_PROFILE", "m1"),
-            ("MARIAN_MLX_METAL_ATTENTION", "flash"),
-            ("MARIAN_MLX_METAL_FLASH_THRESHOLD", "128"),
-            ("MARIAN_MLX_METAL_FLASH_QUERY_TILE", "4"),
-            ("MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH", "9"),
-            ("MARIAN_MLX_METAL_DECODE_ROW_BUDGET", "54"),
-            ("MARIAN_MLX_METAL_DECODE_MAX_STEPS", "6"),
-            ("MARIAN_MLX_METAL_DECODE_SELECTION_THREADS", "256"),
-            ("MARIAN_MLX_METAL_CUSTOM_GEMM_MAX_ROWS", "0"),
+            ("MARIAN_EDGE_METAL_PRECISION", "mixed-f16"),
+            ("MARIAN_EDGE_METAL_PROFILE", "m1"),
+            ("MARIAN_EDGE_METAL_ATTENTION", "flash"),
+            ("MARIAN_EDGE_METAL_FLASH_THRESHOLD", "128"),
+            ("MARIAN_EDGE_METAL_FLASH_QUERY_TILE", "4"),
+            ("MARIAN_EDGE_METAL_DUPLICATE_BATCH_WIDTH", "9"),
+            ("MARIAN_EDGE_METAL_DECODE_ROW_BUDGET", "54"),
+            ("MARIAN_EDGE_METAL_DECODE_MAX_STEPS", "6"),
+            ("MARIAN_EDGE_METAL_DECODE_SELECTION_THREADS", "256"),
+            ("MARIAN_EDGE_METAL_CUSTOM_GEMM_MAX_ROWS", "0"),
         ]);
         let config = MetalConfig::from_lookup(|name| values.get(name).map(ToString::to_string))
             .expect("configuration must parse");
@@ -246,20 +246,20 @@ mod tests {
     #[test]
     fn invalid_values_name_the_failed_setting() {
         let error = MetalConfig::from_lookup(|name| {
-            (name == "MARIAN_MLX_METAL_DECODE_SELECTION_THREADS").then(|| "64".into())
+            (name == "MARIAN_EDGE_METAL_DECODE_SELECTION_THREADS").then(|| "64".into())
         })
         .expect_err("invalid thread count must fail");
-        assert!(error.contains("MARIAN_MLX_METAL_DECODE_SELECTION_THREADS"));
+        assert!(error.contains("MARIAN_EDGE_METAL_DECODE_SELECTION_THREADS"));
     }
 
     #[test]
-    fn edge_alias_is_supported_but_conflicting_values_fail() {
+    fn legacy_prefix_is_supported_but_conflicting_values_fail() {
         let alias = HashMap::from([
-            ("MARIAN_EDGE_METAL_PRECISION", "mixed-f16"),
-            ("MARIAN_EDGE_METAL_PROFILE", "m1"),
+            ("MARIAN_MLX_METAL_PRECISION", "mixed-f16"),
+            ("MARIAN_MLX_METAL_PROFILE", "m1"),
         ]);
         let config = MetalConfig::from_lookup(|name| alias.get(name).map(ToString::to_string))
-            .expect("edge-prefixed alias must remain supported");
+            .expect("legacy prefix must remain supported");
         assert_eq!(config.precision, MetalPrecision::MixedF16);
         assert_eq!(config.profile, MetalProfile::M1);
 

@@ -175,7 +175,7 @@ fn main() {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "schema": "marian-mlx.microbenchmark.v1",
+            "schema": "marian-edge.microbenchmark.v1",
             "iterations": iterations,
             "results": output,
         }))

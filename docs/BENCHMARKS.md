@@ -27,7 +27,7 @@ page behavior, so it is not used as an allocator comparison.
 
 ### Final FlashAttention-style A/B
 
-This A/B changes only `MARIAN_MLX_METAL_ATTENTION` in the final binary. Flash
+This A/B changes only `MARIAN_EDGE_METAL_ATTENTION` in the final binary. Flash
 and classic produced identical output hashes for both workloads.
 
 | Workload | Classic | Flash q4 auto | Throughput change | Flash p50 | Flash p95 |
@@ -105,7 +105,7 @@ duplicate coalescing.
 
 This controlled A/B keeps the current Rust/Metal host, FP32 weights, request
 driver, model, and batching fixed, changing only
-`MARIAN_MLX_METAL_ATTENTION`. It uses 1,000 short requests and ten corpus
+`MARIAN_EDGE_METAL_ATTENTION`. It uses 1,000 short requests and ten corpus
 requests after warmup.
 
 | Workload | Attention | Throughput | p50 | p95 |
@@ -149,7 +149,7 @@ The defaults are the deployment setting. Environment overrides exist for
 controlled local sweeps, not as required production configuration:
 
 ```sh
-target/release/marian-mlx-server --backend metal --model-dir models/enzh \
+target/release/marian-edge-server --backend metal --model-dir models/enzh \
   --max-batch-size 16 --batch-window-us 750
 ```
 

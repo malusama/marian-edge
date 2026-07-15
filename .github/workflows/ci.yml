@@ -56,8 +56,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends shellcheck
-          shellcheck scripts/*.sh scripts/marian-mlxctl docker/*.sh tools/*.sh
-          for script in scripts/*.sh scripts/marian-mlxctl docker/*.sh tools/*.sh; do
+          shellcheck scripts/*.sh scripts/marian-edgectl docker/*.sh tools/*.sh
+          for script in scripts/*.sh scripts/marian-edgectl docker/*.sh tools/*.sh; do
             sh -n "$script"
           done
       - name: Compose contract
@@ -81,13 +81,13 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Build image
-        run: docker build --tag marian-mlx:ci .
+        run: docker build --tag marian-edge:ci .
       - name: Start from an empty model volume and translate
         shell: bash
         run: |
           set -euo pipefail
-          container=marian-mlx-ci
-          volume=marian-mlx-ci-model
+          container=marian-edge-ci
+          volume=marian-edge-ci-model
           cleanup() {
             docker rm --force "$container" >/dev/null 2>&1 || true
             docker volume rm --force "$volume" >/dev/null 2>&1 || true
@@ -96,9 +96,9 @@ jobs:
           docker volume create "$volume" >/dev/null
           docker run --detach --name "$container" \
             --publish 127.0.0.1:13000:3000 \
-            --env MARIAN_MLX_CPU_THREADS=1 \
+            --env MARIAN_EDGE_CPU_THREADS=1 \
             --volume "$volume:/models" \
-            marian-mlx:ci >/dev/null
+            marian-edge:ci >/dev/null
 
           ready=false
           for _ in $(seq 1 120); do
@@ -136,8 +136,8 @@ jobs:
 
           docker exec "$container" sh -c \
             'test ! -e /models/en-zh/bergamot.yml && test -s /models/en-zh/manifest.json'
-          docker run --rm --entrypoint sh marian-mlx:ci \
-            -c 'ldd /usr/local/bin/marian-mlx-server' > /tmp/ldd.txt
+          docker run --rm --entrypoint sh marian-edge:ci \
+            -c 'ldd /usr/local/bin/marian-edge-server' > /tmp/ldd.txt
           ! rg 'libstdc\+\+|libc\+\+|libsentencepiece' /tmp/ldd.txt
 
           docker restart "$container" >/dev/null

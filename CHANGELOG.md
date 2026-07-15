@@ -5,12 +5,14 @@ Versioning after the first stable release.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-16
+
 ### Changed
 
-- Renamed the internal direct-Metal Rust package and source directory to
-  `marian-metal` / `crates/marian-metal`. This is a Rust package/import change
-  for the next minor release; repository, binary, archive, service, image, CLI
-  alias, and installer names remain `marian-mlx` compatible.
+- Renamed the product and repository to Marian Edge. The executable,
+  archive, service, image, controller, and installer now use `marian-edge`;
+  the direct-Metal Rust package and source directory use `marian-metal` /
+  `crates/marian-metal`.
 - Made `marian-edge.transformer-ssru.v1` the canonical manifest namespace for
   new CPU/Metal model producers while loaders, installer, and controller retain
   the historical manifest value. Safetensors metadata stays byte-stable so the
@@ -18,13 +20,14 @@ Versioning after the first stable release.
 - Centralized graph validation and sinusoidal positions in `marian-model`, and
   centralized CPU-only execution limits privately in `marian-cpu` instead of
   leaking backend policy into the model schema.
-- Kept `MARIAN_MLX_METAL_*` as the canonical product tuning namespace, accepted
-  `MARIAN_EDGE_METAL_*` aliases, and made conflicting values fail closed.
+- Made `MARIAN_EDGE_*` the canonical runtime and Metal tuning namespace,
+  retained `MARIAN_MLX_*` runtime aliases for migration, and made conflicting
+  values fail closed.
 - Added a zero-dependency documentation contract check for release versions,
   relative links, public routes, Immersive Translate fields and limits, and
   native/Docker port mappings; CI and release gates now run it.
 - Made the Docker Compose host port and image configurable through
-  `MARIAN_MLX_HOST_PORT` and `MARIAN_MLX_IMAGE` while retaining container port
+  `MARIAN_EDGE_HOST_PORT` and `MARIAN_EDGE_IMAGE` while retaining container port
   3000 and loopback-only host publication by default.
 
 ### Fixed
@@ -280,12 +283,13 @@ Versioning after the first stable release.
   `zh`.
 - Rootless launchd installer and CPU-only multi-architecture Docker path.
 
-[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/malusama/marian-mlx/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/malusama/marian-mlx/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/malusama/marian-mlx/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/malusama/marian-mlx/compare/v0.2.1...v0.3.0
-[0.2.1]: https://github.com/malusama/marian-mlx/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/malusama/marian-mlx/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/malusama/marian-mlx/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/malusama/marian-mlx/releases/tag/v0.1.0
+[Unreleased]: https://github.com/malusama/marian-edge/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/malusama/marian-edge/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/malusama/marian-edge/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/malusama/marian-edge/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/malusama/marian-edge/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/malusama/marian-edge/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/malusama/marian-edge/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/malusama/marian-edge/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/malusama/marian-edge/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/malusama/marian-edge/releases/tag/v0.1.0

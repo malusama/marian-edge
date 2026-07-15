@@ -10,12 +10,12 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.86"
 license = "MIT"
-repository = "https://github.com/malusama/marian-mlx"
-homepage = "https://github.com/malusama/marian-mlx"
+repository = "https://github.com/malusama/marian-edge"
+homepage = "https://github.com/malusama/marian-edge"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
@@ -23,11 +23,11 @@ axum = "0.8.8"
 clap = { version = "4.5.60", features = ["derive", "env"] }
 futures-util = "0.3.32"
 half = "2.7.1"
-marian-core = { version = "0.6.0", path = "crates/marian-core" }
-marian-cpu = { version = "0.6.0", path = "crates/marian-cpu" }
-marian-model = { version = "0.6.0", path = "crates/marian-model" }
-marian-metal = { version = "0.6.0", path = "crates/marian-metal" }
-marian-tokenizer = { version = "0.6.0", path = "crates/marian-tokenizer" }
+marian-core = { version = "0.7.0", path = "crates/marian-core" }
+marian-cpu = { version = "0.7.0", path = "crates/marian-cpu" }
+marian-model = { version = "0.7.0", path = "crates/marian-model" }
+marian-metal = { version = "0.7.0", path = "crates/marian-metal" }
+marian-tokenizer = { version = "0.7.0", path = "crates/marian-tokenizer" }
 matrixmultiply = { version = "0.3.10", features = ["threading"] }
 memmap2 = "0.9.9"
 objc2 = "0.6.3"

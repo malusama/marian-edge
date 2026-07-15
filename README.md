@@ -1,6 +1,6 @@
-# Marian MLX
+# Marian Edge
 
-[![CI](https://github.com/malusama/marian-mlx/actions/workflows/ci.yml/badge.svg)](https://github.com/malusama/marian-mlx/actions/workflows/ci.yml)
+[![CI](https://github.com/malusama/marian-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/malusama/marian-edge/actions/workflows/ci.yml)
 [![MIT](https://img.shields.io/badge/service-MIT-blue.svg)](LICENSE)
 
 Local English-to-Chinese translation with a Rust HTTP service. On Apple
@@ -37,15 +37,15 @@ LaunchAgent on `127.0.0.1:3000`, and converts the model locally.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/main/scripts/install-macos.sh | sh
+  https://raw.githubusercontent.com/malusama/marian-edge/main/scripts/install-macos.sh | sh
 ```
 
 For a reproducible pinned install:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.6.0 sh
+  https://raw.githubusercontent.com/malusama/marian-edge/v0.7.0/scripts/install-macos.sh | \
+  MARIAN_EDGE_VERSION=v0.7.0 sh
 ```
 
 `v0.1.1` remains available as the last historical MLX/Bergamot release. Its
@@ -53,22 +53,27 @@ runtime layout is not compatible with the direct Metal bundle contract used by
 `v0.2.0` and later. Use `v0.2.1` or newer when rollback across those layouts is
 required.
 
+Upgrading an existing `marian-mlx` installation is supported. The installer
+discovers its data and state directories, replaces the old LaunchAgent only
+after the new service is ready, accepts the previous `MARIAN_MLX_*` settings,
+and keeps `marian-mlxctl` as an alias for `marian-edgectl`.
+
 You can inspect the script before running it. The installer requires at least
 750 MB of free space each time it runs. A first install uses most of that space
 and takes longer because the model and a pinned Python conversion environment
 are prepared locally.
 
 ```sh
-~/.local/bin/marian-mlxctl status
-~/.local/bin/marian-mlxctl verify
-~/.local/bin/marian-mlxctl logs
-~/.local/bin/marian-mlxctl restart
-~/.local/bin/marian-mlxctl stop
-~/.local/bin/marian-mlxctl start
-~/.local/bin/marian-mlxctl update
-~/.local/bin/marian-mlxctl rollback
-~/.local/bin/marian-mlxctl uninstall          # keeps the model/cache
-~/.local/bin/marian-mlxctl uninstall --purge  # removes everything
+~/.local/bin/marian-edgectl status
+~/.local/bin/marian-edgectl verify
+~/.local/bin/marian-edgectl logs
+~/.local/bin/marian-edgectl restart
+~/.local/bin/marian-edgectl stop
+~/.local/bin/marian-edgectl start
+~/.local/bin/marian-edgectl update
+~/.local/bin/marian-edgectl rollback
+~/.local/bin/marian-edgectl uninstall          # keeps the model/cache
+~/.local/bin/marian-edgectl uninstall --purge  # removes everything
 ```
 
 To use port 3100, set it on the receiving side of the install pipe and then use
@@ -77,8 +82,8 @@ that same port for every endpoint, including Immersive Translate:
 ```sh
 PORT=3100
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.6.0 MARIAN_MLX_PORT="$PORT" sh
+  https://raw.githubusercontent.com/malusama/marian-edge/v0.7.0/scripts/install-macos.sh | \
+  MARIAN_EDGE_VERSION=v0.7.0 MARIAN_EDGE_PORT="$PORT" sh
 curl -fsS "http://127.0.0.1:$PORT/readyz"
 curl -fsS "http://127.0.0.1:$PORT/info"
 # Immersive Translate URL: http://127.0.0.1:3100/imme
@@ -102,7 +107,7 @@ Compose keeps the container service on port 3000. To publish it on host port
 3100, change only the host side and use 3100 in every client URL:
 
 ```sh
-MARIAN_MLX_HOST_PORT=3100 docker compose up -d
+MARIAN_EDGE_HOST_PORT=3100 docker compose up -d
 curl -fsS http://127.0.0.1:3100/readyz
 curl -fsS http://127.0.0.1:3100/info
 # Immersive Translate URL: http://127.0.0.1:3100/imme
@@ -111,12 +116,12 @@ curl -fsS http://127.0.0.1:3100/info
 Or without Compose:
 
 ```sh
-docker run -d --name marian-mlx --restart unless-stopped \
+docker run -d --name marian-edge --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
-  -v marian-mlx-models:/models \
+  -v marian-edge-models:/models \
   --read-only --tmpfs /tmp:size=64m,mode=1777 \
   --cap-drop ALL --security-opt no-new-privileges \
-  ghcr.io/malusama/marian-mlx:cpu-0.6.0
+  ghcr.io/malusama/marian-edge:cpu-0.7.0
 ```
 
 The published image is multi-architecture AMD64/ARM64, non-root, and CPU-only.
@@ -126,11 +131,11 @@ compressed and uncompressed SHA-256 values. Later starts reuse the volume.
 
 The CPU model has one owner, so changing the compute-thread count does not load
 extra model replicas. Concurrent HTTP requests are still micro-batched before
-inference. `MARIAN_MLX_CPU_THREADS` accepts 1, 2, or 4 and controls both FP32
+inference. `MARIAN_EDGE_CPU_THREADS` accepts 1, 2, or 4 and controls both FP32
 matrix multiplication and the Q8 rten/exact-AVX2 row-parallel kernels:
 
 ```sh
-MARIAN_MLX_CPU_THREADS=2 docker compose up -d --force-recreate
+MARIAN_EDGE_CPU_THREADS=2 docker compose up -d --force-recreate
 ```
 
 The model remains single-owner at every setting. Measure the actual host and
@@ -157,11 +162,11 @@ wildcard is available only for a loopback-only personal deployment:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.6.0 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-edge/v0.7.0/scripts/install-macos.sh | \
+  MARIAN_EDGE_VERSION=v0.7.0 MARIAN_EDGE_CORS_ORIGIN='*' sh
 ```
 
-For Docker, add `MARIAN_MLX_CORS_ORIGIN: "*"` under `environment` only if required.
+For Docker, add `MARIAN_EDGE_CORS_ORIGIN: "*"` under `environment` only if required.
 See the exact payload and troubleshooting in
 [the Immersive Translate guide](docs/IMMERSIVE_TRANSLATE.md).
 
@@ -285,7 +290,7 @@ path uses the converted FP32 model.
 ```sh
 scripts/prepare-enzh-model.sh
 cargo build --locked --release -p marian-server --features cpu
-target/release/marian-mlx-server --backend cpu --cpu-threads 4 \
+target/release/marian-edge-server --backend cpu --cpu-threads 4 \
   --model-dir models/enzh
 ```
 
@@ -299,7 +304,7 @@ and `uv`:
 ```sh
 scripts/prepare-enzh-model.sh
 cargo build --locked --release -p marian-server --features metal
-target/release/marian-mlx-server --backend metal --model-dir models/enzh
+target/release/marian-edge-server --backend metal --model-dir models/enzh
 ```
 
 FP32 is the default Metal precision contract. An explicit mixed-precision
@@ -307,8 +312,8 @@ storage mode converts model weights to FP16 on upload while retaining FP32
 activations and reductions:
 
 ```sh
-MARIAN_MLX_METAL_PRECISION=mixed-f16 \
-  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+MARIAN_EDGE_METAL_PRECISION=mixed-f16 \
+  target/release/marian-edge-server --backend metal --model-dir models/enzh
 ```
 
 The opt-in mode reports `mixed-f16` from `/info`; it does not silently replace
@@ -323,12 +328,12 @@ uses online softmax, and never writes an O(N^2) score matrix. `/info` reports
 available for qualification and A/B measurements:
 
 ```sh
-MARIAN_MLX_METAL_ATTENTION=classic \
-  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+MARIAN_EDGE_METAL_ATTENTION=classic \
+  target/release/marian-edge-server --backend metal --model-dir models/enzh
 
-MARIAN_MLX_METAL_ATTENTION=auto \
-MARIAN_MLX_METAL_FLASH_THRESHOLD=1 \
-  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+MARIAN_EDGE_METAL_ATTENTION=auto \
+MARIAN_EDGE_METAL_FLASH_THRESHOLD=1 \
+  target/release/marian-edge-server --backend metal --model-dir models/enzh
 ```
 
 On the measured Apple M1 / 16 GB host, the deployment throughput knee is
@@ -337,7 +342,7 @@ requests in the v0.6 qualification. A historical v0.4 mixed-f16 sweep found no
 further gain at concurrency 64 and substantially higher median latency; that
 older point is a sizing warning, not current v0.6 FP32 proof. The M1-qualified
 duplicate-row width defaults to 9 and can be overridden with
-`MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH`. Core always coalesces exact logical
+`MARIAN_EDGE_METAL_DUPLICATE_BATCH_WIDTH`. Core always coalesces exact logical
 duplicates; this knob rematerializes up to that many physical rows inside the
 current dynamic batch for GPU occupancy and never caches results. The remaining
 M1 defaults are decode row budget 54, at most six steps per submission, 256

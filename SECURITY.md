@@ -10,7 +10,7 @@ releases may contain breaking changes.
 Please use the repository's private **Security > Report a vulnerability**
 form:
 
-<https://github.com/malusama/marian-mlx/security/advisories/new>
+<https://github.com/malusama/marian-edge/security/advisories/new>
 
 Do not file a public issue for a suspected vulnerability. Include the affected
 version, operating system or image digest, reproduction steps, and realistic

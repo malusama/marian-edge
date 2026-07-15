@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 
-FORMAT = "marian-mlx.metal-trace-summary.v1"
+FORMAT = "marian-edge.metal-trace-summary.v1"
 EVIDENCE_FILES = {
     "submissions": "submissions.xml",
     "completed": "completed.xml",

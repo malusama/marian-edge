@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for improving Marian MLX. Small, focused pull requests with a clear
+Thanks for improving Marian Edge. Small, focused pull requests with a clear
 failure case or benchmark are easiest to review.
 
 ## Before opening a pull request
@@ -19,7 +19,7 @@ scripts/prepare-enzh-model.sh
 scripts/build-release.sh
 cargo test -p marian-tokenizer --test mozilla_enzh -- --ignored
 cargo test -p marian-metal --features metal --test golden -- --ignored
-MARIAN_MLX_MODEL_DIR=models/enzh cargo test -p marian-metal --features metal \
+MARIAN_EDGE_MODEL_DIR=models/enzh cargo test -p marian-metal --features metal \
   --release --test cpu_metal_differential -- --ignored
 MARIAN_CPU_MODEL_DIR="$PWD/models/enzh" \
   cargo test -p marian-cpu --release --test golden -- --ignored
@@ -83,9 +83,9 @@ Complete the following on the release commit before creating a tag:
 After pushing the tag:
 
 5. Confirm the release workflow publishes
-   `marian-mlx-macos-arm64.tar.gz`, `SHA256SUMS`, and `install-macos.sh`, and
+   `marian-edge-macos-arm64.tar.gz`, `SHA256SUMS`, and `install-macos.sh`, and
    that their provenance attestations are present.
-6. Confirm `ghcr.io/malusama/marian-mlx:cpu-X.Y.Z` and the floating `:cpu` tag
+6. Confirm `ghcr.io/malusama/marian-edge:cpu-X.Y.Z` and the floating `:cpu` tag
    both contain Linux AMD64 and ARM64 manifests built from the tagged commit.
 7. Exercise a fresh pinned macOS install, `/readyz`, `/info`, update, rollback,
    and uninstall. Confirm the backend, revision, device, precision, and model

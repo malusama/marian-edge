@@ -1,27 +1,41 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY=${MARIAN_MLX_REPOSITORY:-malusama/marian-mlx}
-REQUESTED_VERSION=${MARIAN_MLX_VERSION:-latest}
-if [ "${MARIAN_MLX_PORT+x}" = x ]; then
+REPOSITORY=${MARIAN_EDGE_REPOSITORY:-${MARIAN_MLX_REPOSITORY:-malusama/marian-edge}}
+REQUESTED_VERSION=${MARIAN_EDGE_VERSION:-${MARIAN_MLX_VERSION:-latest}}
+if [ "${MARIAN_EDGE_PORT+x}" = x ]; then
+  PORT=$MARIAN_EDGE_PORT
+  PORT_WAS_EXPLICIT=true
+elif [ "${MARIAN_MLX_PORT+x}" = x ]; then
   PORT=$MARIAN_MLX_PORT
   PORT_WAS_EXPLICIT=true
 else
   PORT=
   PORT_WAS_EXPLICIT=false
 fi
-if [ "${MARIAN_MLX_CORS_ORIGIN+x}" = x ]; then
+if [ "${MARIAN_EDGE_CORS_ORIGIN+x}" = x ]; then
+  CORS_ORIGIN=$MARIAN_EDGE_CORS_ORIGIN
+  CORS_ORIGIN_WAS_EXPLICIT=true
+elif [ "${MARIAN_MLX_CORS_ORIGIN+x}" = x ]; then
   CORS_ORIGIN=$MARIAN_MLX_CORS_ORIGIN
   CORS_ORIGIN_WAS_EXPLICIT=true
 else
   CORS_ORIGIN=
   CORS_ORIGIN_WAS_EXPLICIT=false
 fi
-BASE=${MARIAN_MLX_HOME:-"$HOME/.local/share/marian-mlx"}
-STATE=${MARIAN_MLX_STATE:-"$HOME/.local/state/marian-mlx"}
-BIN_DIR=${MARIAN_MLX_BIN_DIR:-"$HOME/.local/bin"}
-LABEL=io.github.malusama.marian-mlx
-LEGACY_LABEL=${MARIAN_MLX_LEGACY_LABEL:-}
+DEFAULT_BASE="$HOME/.local/share/marian-edge"
+DEFAULT_STATE="$HOME/.local/state/marian-edge"
+if [ ! -e "$DEFAULT_BASE" ] && [ -d "$HOME/.local/share/marian-mlx" ]; then
+  DEFAULT_BASE="$HOME/.local/share/marian-mlx"
+fi
+if [ ! -e "$DEFAULT_STATE" ] && [ -d "$HOME/.local/state/marian-mlx" ]; then
+  DEFAULT_STATE="$HOME/.local/state/marian-mlx"
+fi
+BASE=${MARIAN_EDGE_HOME:-${MARIAN_MLX_HOME:-$DEFAULT_BASE}}
+STATE=${MARIAN_EDGE_STATE:-${MARIAN_MLX_STATE:-$DEFAULT_STATE}}
+BIN_DIR=${MARIAN_EDGE_BIN_DIR:-${MARIAN_MLX_BIN_DIR:-"$HOME/.local/bin"}}
+LABEL=io.github.malusama.marian-edge
+LEGACY_LABEL=${MARIAN_EDGE_LEGACY_LABEL:-${MARIAN_MLX_LEGACY_LABEL:-io.github.malusama.marian-mlx}}
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LEGACY_PLIST=
 CONFIG_DIR="$BASE/config"
@@ -29,12 +43,12 @@ PORT_CONFIG="$CONFIG_DIR/port"
 CORS_CONFIG="$CONFIG_DIR/cors-origin"
 LEGACY_LABEL_CONFIG="$CONFIG_DIR/legacy-label"
 LEGACY_ARCHIVE_CONFIG="$CONFIG_DIR/legacy-archive"
-ASSET=marian-mlx-macos-arm64.tar.gz
+ASSET=marian-edge-macos-arm64.tar.gz
 UV_VERSION=0.11.28
 UV_INSTALLER_SHA256=b7b3fe80cad1142a2a5794050b7db7b3291d1bac1423b0732571dd9366e8ca8b
 
-say() { printf '%s\n' "marian-mlx: $*"; }
-fail() { printf '%s\n' "marian-mlx: error: $*" >&2; exit 1; }
+say() { printf '%s\n' "marian-edge: $*"; }
+fail() { printf '%s\n' "marian-edge: error: $*" >&2; exit 1; }
 
 if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
   fail "the native installer requires Apple Silicon macOS"
@@ -45,19 +59,19 @@ if [ "$MACOS_MAJOR" -lt 14 ]; then
 fi
 case "$BASE" in
   /*) ;;
-  *) fail "MARIAN_MLX_HOME must be an absolute path" ;;
+  *) fail "MARIAN_EDGE_HOME must be an absolute path" ;;
 esac
 case "$STATE" in
   /*) ;;
-  *) fail "MARIAN_MLX_STATE must be an absolute path" ;;
+  *) fail "MARIAN_EDGE_STATE must be an absolute path" ;;
 esac
 case "$BIN_DIR" in
   /*) ;;
-  *) fail "MARIAN_MLX_BIN_DIR must be an absolute path" ;;
+  *) fail "MARIAN_EDGE_BIN_DIR must be an absolute path" ;;
 esac
-case "$BASE" in ""|/|"$HOME") fail "unsafe MARIAN_MLX_HOME: $BASE" ;; esac
-case "$STATE" in ""|/|"$HOME") fail "unsafe MARIAN_MLX_STATE: $STATE" ;; esac
-case "$BIN_DIR" in ""|/) fail "unsafe MARIAN_MLX_BIN_DIR: $BIN_DIR" ;; esac
+case "$BASE" in ""|/|"$HOME") fail "unsafe MARIAN_EDGE_HOME: $BASE" ;; esac
+case "$STATE" in ""|/|"$HOME") fail "unsafe MARIAN_EDGE_STATE: $STATE" ;; esac
+case "$BIN_DIR" in ""|/) fail "unsafe MARIAN_EDGE_BIN_DIR: $BIN_DIR" ;; esac
 if [ "$PORT_WAS_EXPLICIT" = false ]; then
   if [ -e "$PORT_CONFIG" ] || [ -L "$PORT_CONFIG" ]; then
     if [ ! -f "$PORT_CONFIG" ] || [ -L "$PORT_CONFIG" ] ||
@@ -70,10 +84,10 @@ if [ "$PORT_WAS_EXPLICIT" = false ]; then
   fi
 fi
 case "$PORT" in
-  ''|*[!0-9]*) fail "MARIAN_MLX_PORT must be a number" ;;
+  ''|*[!0-9]*) fail "MARIAN_EDGE_PORT must be a number" ;;
 esac
 if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-  fail "MARIAN_MLX_PORT must be between 1 and 65535"
+  fail "MARIAN_EDGE_PORT must be between 1 and 65535"
 fi
 if [ "$CORS_ORIGIN_WAS_EXPLICIT" = false ] &&
    { [ -e "$CORS_CONFIG" ] || [ -L "$CORS_CONFIG" ]; }; then
@@ -84,13 +98,13 @@ if [ "$CORS_ORIGIN_WAS_EXPLICIT" = false ] &&
   CORS_ORIGIN=$(sed -n '1p' "$CORS_CONFIG")
 fi
 if [ "$(printf '%s' "$CORS_ORIGIN" | wc -l | tr -d ' ')" -ne 0 ]; then
-  fail "MARIAN_MLX_CORS_ORIGIN must be a single line"
+  fail "MARIAN_EDGE_CORS_ORIGIN must be a single line"
 fi
 if [ -n "$LEGACY_LABEL" ]; then
   case "$LEGACY_LABEL" in
-    *[!A-Za-z0-9._-]*) fail "MARIAN_MLX_LEGACY_LABEL contains an invalid character" ;;
+    *[!A-Za-z0-9._-]*) fail "MARIAN_EDGE_LEGACY_LABEL contains an invalid character" ;;
   esac
-  [ "$LEGACY_LABEL" != "$LABEL" ] || fail "MARIAN_MLX_LEGACY_LABEL must name a different service"
+  [ "$LEGACY_LABEL" != "$LABEL" ] || fail "MARIAN_EDGE_LEGACY_LABEL must name a different service"
   LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 fi
 
@@ -130,7 +144,7 @@ if [ -n "$LEGACY_LABEL" ] && { [ -e "$LEGACY_PLIST" ] || [ -L "$LEGACY_PLIST" ];
   plutil -lint "$LEGACY_PLIST" >/dev/null || fail "the previous LaunchAgent plist is invalid"
   PLIST_LABEL=$(plutil -extract Label raw -o - "$LEGACY_PLIST" 2>/dev/null || true)
   [ "$PLIST_LABEL" = "$LEGACY_LABEL" ] || \
-    fail "the previous LaunchAgent plist label does not match MARIAN_MLX_LEGACY_LABEL"
+    fail "the previous LaunchAgent plist label does not match MARIAN_EDGE_LEGACY_LABEL"
   LEGACY_PRESENT=true
 elif [ "$LEGACY_WAS_LOADED" = true ]; then
   fail "the previous service is loaded but its LaunchAgent plist is missing"
@@ -148,7 +162,7 @@ if [ "${AVAILABLE_KB:-0}" -lt 750000 ]; then
   fail "at least 750 MB of free disk space is required to run the installer"
 fi
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/marian-mlx-install.XXXXXX")
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/marian-edge-install.XXXXXX")
 CUTOVER_STARTED=false
 CUTOVER_COMMITTED=false
 LEGACY_DISABLED=false
@@ -159,6 +173,7 @@ OLD_PREVIOUS=
 CURRENT_WAS_LINK=false
 PREVIOUS_WAS_LINK=false
 CTL_WAS_PRESENT=false
+LEGACY_CTL_WAS_PRESENT=false
 UNINSTALL_WAS_PRESENT=false
 PORT_CONFIG_WAS_PRESENT=false
 CORS_CONFIG_WAS_PRESENT=false
@@ -224,7 +239,13 @@ rollback_cutover() {
     rm -f "$PLIST" || ROLLBACK_OK=false
   fi
   if [ "$CTL_WAS_PRESENT" = true ]; then
-    install -m 0755 "$TMP/previous.marian-mlxctl" "$BIN_DIR/marian-mlxctl" || ROLLBACK_OK=false
+    install -m 0755 "$TMP/previous.marian-edgectl" "$BIN_DIR/marian-edgectl" || ROLLBACK_OK=false
+  else
+    rm -f "$BIN_DIR/marian-edgectl" || ROLLBACK_OK=false
+  fi
+  if [ "$LEGACY_CTL_WAS_PRESENT" = true ]; then
+    install -m 0755 "$TMP/previous.marian-mlxctl" "$BIN_DIR/marian-mlxctl" || \
+      ROLLBACK_OK=false
   else
     rm -f "$BIN_DIR/marian-mlxctl" || ROLLBACK_OK=false
   fi
@@ -357,7 +378,7 @@ TOP_LEVEL=$(tar -tzf "$TMP/$ASSET" | awk -F/ 'NF && $1 != "" {print $1}' | LC_AL
 TOP_COUNT=$(printf '%s\n' "$TOP_LEVEL" | awk 'NF {n++} END {print n + 0}')
 [ "$TOP_COUNT" -eq 1 ] || fail "release archive must contain one top-level directory"
 case "$TOP_LEVEL" in
-  marian-mlx-v*-macos-arm64) ;;
+  marian-edge-v*-macos-arm64) ;;
   *) fail "release archive layout is invalid" ;;
 esac
 tar -xzf "$TMP/$ASSET" -C "$TMP"
@@ -367,25 +388,25 @@ VERSION=$(sed -n '1p' "$BUNDLE/VERSION")
 printf '%s\n' "$VERSION" | grep -Eq \
   '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z][0-9A-Za-z.-]*)?$' || \
   fail "release version is invalid"
-[ "$TOP_LEVEL" = "marian-mlx-v$VERSION-macos-arm64" ] || \
+[ "$TOP_LEVEL" = "marian-edge-v$VERSION-macos-arm64" ] || \
   fail "release directory and VERSION do not match"
 
 bundle_is_valid() {
   bundle=$1
   [ -d "$bundle" ] && \
-  [ -x "$bundle/marian-mlx-server" ] && \
+  [ -x "$bundle/marian-edge-server" ] && \
   [ -x "$bundle/scripts/prepare-enzh-model.sh" ] && \
-  [ -x "$bundle/scripts/marian-mlxctl" ] && \
+  [ -x "$bundle/scripts/marian-edgectl" ] && \
   [ -x "$bundle/scripts/uninstall-macos.sh" ] && \
-  [ ! -L "$bundle/marian-mlx-server" ] && \
+  [ ! -L "$bundle/marian-edge-server" ] && \
   [ ! -e "$bundle/libmlx.dylib" ] && \
   [ ! -e "$bundle/mlx.metallib" ] && \
   [ -f "$bundle/SHA256SUMS" ] && \
   ! find "$bundle" -type l -print -quit | grep -q . && \
   ! find "$bundle" \( -name '*.dylib' -o -name '*.metallib' \) -print -quit | grep -q . && \
   (cd "$bundle" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) && \
-  file "$bundle/marian-mlx-server" | grep -q arm64 && \
-  codesign --verify --strict "$bundle/marian-mlx-server" >/dev/null 2>&1
+  file "$bundle/marian-edge-server" | grep -q arm64 && \
+  codesign --verify --strict "$bundle/marian-edge-server" >/dev/null 2>&1
 }
 
 bundle_is_valid "$BUNDLE" || fail "release bundle verification failed"
@@ -459,8 +480,12 @@ elif [ -e "$BASE/previous" ]; then
   fail "$BASE/previous must be a symbolic link"
 fi
 [ -f "$PLIST" ] && cp -p "$PLIST" "$TMP/previous.plist"
-if [ -f "$BIN_DIR/marian-mlxctl" ]; then
+if [ -f "$BIN_DIR/marian-edgectl" ]; then
   CTL_WAS_PRESENT=true
+  cp -p "$BIN_DIR/marian-edgectl" "$TMP/previous.marian-edgectl"
+fi
+if [ -f "$BIN_DIR/marian-mlxctl" ]; then
+  LEGACY_CTL_WAS_PRESENT=true
   cp -p "$BIN_DIR/marian-mlxctl" "$TMP/previous.marian-mlxctl"
 fi
 if [ -f "$BASE/uninstall-macos.sh" ]; then
@@ -498,7 +523,7 @@ xml_escape() {
 sed_replacement() {
   printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
 }
-PROGRAM=$(sed_replacement "$(xml_escape "$BASE/current/marian-mlx-server")")
+PROGRAM=$(sed_replacement "$(xml_escape "$BASE/current/marian-edge-server")")
 MODEL_DIR=$(sed_replacement "$(xml_escape "$BASE/models/en-zh")")
 STDOUT=$(sed_replacement "$(xml_escape "$STATE/server.log")")
 STDERR=$(sed_replacement "$(xml_escape "$STATE/server.error.log")")
@@ -518,7 +543,7 @@ sed \
   -e "s|@STDERR@|$STDERR|g" \
   -e "s|@BIND@|$BIND|g" \
   -e "s|@CORS_ARGUMENT@|$CORS_XML|g" \
-  "$RELEASE_DIR/packaging/launchd/io.github.malusama.marian-mlx.plist" \
+  "$RELEASE_DIR/packaging/launchd/io.github.malusama.marian-edge.plist" \
   > "$PLIST_NEW"
 plutil -lint "$PLIST_NEW" >/dev/null || fail "generated LaunchAgent is invalid"
 
@@ -556,7 +581,8 @@ if [ "$READY" != true ]; then
   fail "readiness check failed; see $STATE/server.error.log"
 fi
 
-install -m 0755 "$RELEASE_DIR/scripts/marian-mlxctl" "$BIN_DIR/marian-mlxctl"
+install -m 0755 "$RELEASE_DIR/scripts/marian-edgectl" "$BIN_DIR/marian-edgectl"
+install -m 0755 "$RELEASE_DIR/scripts/marian-edgectl" "$BIN_DIR/marian-mlxctl"
 install -m 0755 "$RELEASE_DIR/scripts/uninstall-macos.sh" "$BASE/uninstall-macos.sh"
 printf '%s\n' "$PORT" > "$TMP/port"
 install -m 0644 "$TMP/port" "$PORT_CONFIG"
@@ -580,4 +606,5 @@ fi
 CUTOVER_COMMITTED=true
 say "installed v$VERSION on http://127.0.0.1:$PORT"
 say "runtime: $INFO"
-say "control command: $BIN_DIR/marian-mlxctl status"
+say "control command: $BIN_DIR/marian-edgectl status"
+say "legacy control alias: $BIN_DIR/marian-mlxctl"

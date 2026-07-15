@@ -41,8 +41,8 @@ esac
 PID=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | sed -n '1p')
 [ -n "$PID" ] || fail "no listening process found for $URL"
 
-READY_FILE=${TMPDIR:-/tmp}/marian-mlx-metal-trace-ready.$$
-NOTIFICATION=io.github.malusama.marian-mlx.metal-trace-ready.$$
+READY_FILE=${TMPDIR:-/tmp}/marian-edge-metal-trace-ready.$$
+NOTIFICATION=io.github.malusama.marian-edge.metal-trace-ready.$$
 TRACE_PID=
 READY_PID=
 
