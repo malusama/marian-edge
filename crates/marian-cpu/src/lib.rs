@@ -6,6 +6,9 @@
 //! Text tokenization remains separate from tensor execution.
 
 mod backend;
+#[cfg(feature = "benchmarks")]
+#[doc(hidden)]
+pub mod benchmarking;
 mod engine;
 mod legacy_q8;
 mod q8_arm;
@@ -22,7 +25,9 @@ pub use legacy_q8::{
     MarianBinaryModel, MarianTensor, MarianTensorData, MarianTensorType, Q8ValidationReport,
 };
 pub use marian_model::{Architecture, Checksums, ModelManifest};
-pub use q8_engine::Q8CpuEngine;
+pub use q8_engine::{Q8CpuEngine, Q8MemoryReport};
 pub use q8_error::Q8Error;
-pub use q8_gemm::{Q8ExecutionPath, Q8Linear, quantize_symmetric_u8};
+pub use q8_gemm::{
+    Q8ExecutionPath, Q8Linear, Q8LinearScratch, quantize_symmetric_u8, quantize_symmetric_u8_into,
+};
 pub use segmenter::{SegmentError, TextSegment, segment_text};

@@ -1,10 +1,17 @@
-use std::{cell::Cell, collections::HashMap, fs, mem::size_of, path::Path};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    fs,
+    mem::size_of,
+    path::Path,
+};
 
+use memmap2::MmapOptions;
 use safetensors::{Dtype, SafeTensors, tensor::TensorView};
 
 use marian_model::{Architecture, LexicalShortlist};
 
-use crate::metal_runtime::{Buffer, Commands, MetalParams, MetalRuntime, grid};
+use crate::metal_runtime::{Buffer, Commands, MetalParams, MetalRuntime, MetalStorage, grid};
 
 const MAXIMUM_POSITION: usize = 4_096;
 const MAXIMUM_BATCH: usize = 256;
@@ -18,6 +25,8 @@ struct MatMulParams {
     cols: u32,
     inner: u32,
     has_bias: u32,
+    activation: u32,
+    storage: u32,
 }
 
 #[repr(C)]
@@ -26,6 +35,7 @@ struct EmbeddingParams {
     batch: u32,
     sequence: u32,
     dim: u32,
+    storage: u32,
 }
 
 #[repr(C)]
@@ -34,12 +44,7 @@ struct DecoderInputParams {
     batch: u32,
     dim: u32,
     position: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ElementParams {
-    count: u32,
+    storage: u32,
 }
 
 #[repr(C)]
@@ -47,6 +52,7 @@ struct ElementParams {
 struct NormParams {
     rows: u32,
     dim: u32,
+    storage: u32,
 }
 
 #[repr(C)]
@@ -65,6 +71,7 @@ struct OutputParams {
     batch: u32,
     candidates: u32,
     dim: u32,
+    storage: u32,
 }
 
 // SAFETY: Every parameter is repr(C), contains only u32 fields, and mirrors
@@ -72,7 +79,6 @@ struct OutputParams {
 unsafe impl MetalParams for MatMulParams {}
 unsafe impl MetalParams for EmbeddingParams {}
 unsafe impl MetalParams for DecoderInputParams {}
-unsafe impl MetalParams for ElementParams {}
 unsafe impl MetalParams for NormParams {}
 unsafe impl MetalParams for AttentionParams {}
 unsafe impl MetalParams for OutputParams {}
@@ -163,6 +169,43 @@ pub(crate) struct MetalEngine {
     ffn_dim: usize,
     source_vocab: usize,
     max_length_factor: usize,
+    scratch: RefCell<MetalBufferArena>,
+    scratch_active: Cell<bool>,
+    storage: MetalStorage,
+}
+
+#[derive(Default)]
+struct MetalBufferArena {
+    buffers: Vec<Buffer>,
+    cursor: usize,
+}
+
+impl MetalBufferArena {
+    fn begin(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn take(&mut self, runtime: &MetalRuntime, elements: usize) -> Result<Buffer, String> {
+        let required = checked_mul(elements, size_of::<f32>())?;
+        let slot = self.cursor;
+        self.cursor += 1;
+        if slot == self.buffers.len() {
+            self.buffers.push(runtime.empty::<f32>(elements)?);
+        } else if self.buffers[slot].byte_len() < required {
+            self.buffers[slot] = runtime.empty::<f32>(elements)?;
+        }
+        Ok(self.buffers[slot].clone())
+    }
+}
+
+struct ScratchScope<'a> {
+    active: &'a Cell<bool>,
+}
+
+impl Drop for ScratchScope<'_> {
+    fn drop(&mut self) {
+        self.active.set(false);
+    }
 }
 
 impl MetalEngine {
@@ -172,6 +215,7 @@ impl MetalEngine {
         architecture: &Architecture,
     ) -> Result<Self, String> {
         let runtime = MetalRuntime::new()?;
+        let storage = runtime.storage();
         let model = ModelWeights::load(&runtime, weights_path, architecture)?;
         let positions = runtime.upload(&make_positions(architecture.model_dim))?;
         let shortlist = LexicalShortlist::load(
@@ -192,11 +236,18 @@ impl MetalEngine {
             ffn_dim: architecture.ffn_dim,
             source_vocab: architecture.source_vocab_size,
             max_length_factor: architecture.max_length_factor.max(1),
+            scratch: RefCell::new(MetalBufferArena::default()),
+            scratch_active: Cell::new(false),
+            storage,
         })
     }
 
     pub(crate) fn device_name(&self) -> &str {
         self.runtime.device_name()
+    }
+
+    pub(crate) fn precision(&self) -> &'static str {
+        self.storage.label()
     }
 
     pub(crate) fn is_ready(&self) -> bool {
@@ -249,6 +300,7 @@ impl MetalEngine {
                 break;
             }
             previous_buffer.write(&previous)?;
+            let _scratch = self.begin_scratch()?;
             let commands = self.commands()?;
             let mut decoder = self.decoder_input(&commands, &previous_buffer, batch, step)?;
 
@@ -542,6 +594,16 @@ impl MetalEngine {
         }
     }
 
+    fn begin_scratch(&self) -> Result<ScratchScope<'_>, String> {
+        if self.scratch_active.replace(true) {
+            return Err("nested Metal scratch scopes are not supported".into());
+        }
+        self.scratch.borrow_mut().begin();
+        Ok(ScratchScope {
+            active: &self.scratch_active,
+        })
+    }
+
     fn prepare_candidates(
         &self,
         tokens: &[i32],
@@ -588,6 +650,7 @@ impl MetalEngine {
             batch: to_u32(batch, "batch")?,
             sequence: to_u32(sequence, "sequence")?,
             dim: to_u32(self.dim, "model dimension")?,
+            storage: self.storage.code(),
         };
         commands.dispatch(
             &commands.runtime().pipelines.embedding,
@@ -616,6 +679,7 @@ impl MetalEngine {
             batch: to_u32(batch, "batch")?,
             dim: to_u32(self.dim, "model dimension")?,
             position: to_u32(position, "decoder position")?,
+            storage: self.storage.code(),
         };
         commands.dispatch(
             &commands.runtime().pipelines.decoder_input,
@@ -643,10 +707,25 @@ impl MetalEngine {
         cols: usize,
         inner: usize,
     ) -> Result<Buffer, String> {
+        self.matmul_with_activation(commands, lhs, rhs, bias, rows, cols, inner, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_with_activation(
+        &self,
+        commands: &Commands<'_>,
+        lhs: &Buffer,
+        rhs: &Buffer,
+        bias: Option<&Buffer>,
+        rows: usize,
+        cols: usize,
+        inner: usize,
+        relu: bool,
+    ) -> Result<Buffer, String> {
         require_f32(lhs, checked_mul(rows, inner)?, "matrix lhs")?;
-        require_f32(rhs, checked_mul(inner, cols)?, "matrix rhs")?;
+        require_model(rhs, checked_mul(inner, cols)?, self.storage, "matrix rhs")?;
         if let Some(bias) = bias {
-            require_f32(bias, cols, "matrix bias")?;
+            require_model(bias, cols, self.storage, "matrix bias")?;
         }
         let output = self.f32_buffer(checked_mul(rows, cols)?)?;
         let params = MatMulParams {
@@ -654,6 +733,8 @@ impl MetalEngine {
             cols: to_u32(cols, "matrix columns")?,
             inner: to_u32(inner, "matrix inner dimension")?,
             has_bias: u32::from(bias.is_some()),
+            activation: u32::from(relu),
+            storage: self.storage.code(),
         };
         commands.dispatch(
             &commands.runtime().pipelines.matmul,
@@ -661,27 +742,6 @@ impl MetalEngine {
             &params,
             grid(round_up(cols, TILE)?, round_up(rows, TILE)?, 1),
             grid(TILE, TILE, 1),
-        );
-        Ok(output)
-    }
-
-    fn relu(
-        &self,
-        commands: &Commands<'_>,
-        input: &Buffer,
-        count: usize,
-    ) -> Result<Buffer, String> {
-        require_f32(input, count, "ReLU input")?;
-        let output = self.f32_buffer(count)?;
-        let params = ElementParams {
-            count: to_u32(count, "ReLU element count")?,
-        };
-        commands.dispatch(
-            &commands.runtime().pipelines.relu,
-            &[input, &output],
-            &params,
-            grid(count, 1, 1),
-            grid(256, 1, 1),
         );
         Ok(output)
     }
@@ -699,10 +759,13 @@ impl MetalEngine {
         let elements = checked_mul(rows, self.dim)?;
         require_f32(input, elements, "layer norm input")?;
         require_f32(residual, elements, "layer norm residual")?;
+        require_model(scale, self.dim, self.storage, "layer norm scale")?;
+        require_model(bias, self.dim, self.storage, "layer norm bias")?;
         let output = self.f32_buffer(elements)?;
         let params = NormParams {
             rows: to_u32(rows, "layer norm rows")?,
             dim: to_u32(self.dim, "model dimension")?,
+            storage: self.storage.code(),
         };
         commands.dispatch_threadgroups(
             &commands.runtime().pipelines.residual_norm,
@@ -735,10 +798,13 @@ impl MetalEngine {
         ] {
             require_f32(buffer, elements, label)?;
         }
+        require_model(scale, self.dim, self.storage, "SSRU scale")?;
+        require_model(bias, self.dim, self.storage, "SSRU bias")?;
         let output = self.f32_buffer(elements)?;
         let params = NormParams {
             rows: to_u32(rows, "SSRU rows")?,
             dim: to_u32(self.dim, "model dimension")?,
+            storage: self.storage.code(),
         };
         commands.dispatch_threadgroups(
             &commands.runtime().pipelines.ssru_norm,
@@ -809,7 +875,7 @@ impl MetalEngine {
         weights: &FeedForwardWeights,
         rows: usize,
     ) -> Result<Buffer, String> {
-        let hidden = self.matmul(
+        let hidden = self.matmul_with_activation(
             commands,
             input,
             &weights.w1,
@@ -817,8 +883,8 @@ impl MetalEngine {
             rows,
             self.ffn_dim,
             self.dim,
+            true,
         )?;
-        let hidden = self.relu(commands, &hidden, checked_mul(rows, self.ffn_dim)?)?;
         let output = self.matmul(
             commands,
             &hidden,
@@ -850,6 +916,7 @@ impl MetalEngine {
             batch: to_u32(batch, "output batch")?,
             candidates: to_u32(candidates.width, "candidate width")?,
             dim: to_u32(self.dim, "model dimension")?,
+            storage: self.storage.code(),
         };
         commands.dispatch(
             &commands.runtime().pipelines.output_logits,
@@ -877,7 +944,11 @@ impl MetalEngine {
     }
 
     fn f32_buffer(&self, elements: usize) -> Result<Buffer, String> {
-        self.runtime.empty::<f32>(elements)
+        if self.scratch_active.get() {
+            self.scratch.borrow_mut().take(&self.runtime, elements)
+        } else {
+            self.runtime.empty::<f32>(elements)
+        }
     }
 }
 
@@ -906,8 +977,12 @@ impl ModelWeights {
                 metadata.len()
             ));
         }
-        let bytes = fs::read(path)
-            .map_err(|error| format!("failed to read weights {}: {error}", path.display()))?;
+        let file = fs::File::open(path)
+            .map_err(|error| format!("failed to open weights {}: {error}", path.display()))?;
+        // SAFETY: Read-only mapping; Metal uploads every tensor before this
+        // function returns, so no Buffer retains a pointer into the mapping.
+        let bytes = unsafe { MmapOptions::new().map(&file) }
+            .map_err(|error| format!("failed to map weights {}: {error}", path.display()))?;
         let tensors = SafeTensors::deserialize(&bytes)
             .map_err(|error| format!("invalid safetensors {}: {error}", path.display()))?;
         let mut tensors = tensors.tensors().into_iter().collect::<HashMap<_, _>>();
@@ -1080,7 +1155,7 @@ fn take_tensor(
             tensor.shape()
         ));
     }
-    runtime.upload_bytes(tensor.data())
+    runtime.upload_model_f32(tensor.data())
 }
 
 fn make_positions(dim: usize) -> Vec<f32> {
@@ -1098,6 +1173,26 @@ fn make_positions(dim: usize) -> Vec<f32> {
 
 fn require_f32(buffer: &Buffer, elements: usize, label: &str) -> Result<(), String> {
     let required = checked_mul(elements, size_of::<f32>())?;
+    if buffer.byte_len() < required {
+        return Err(format!(
+            "{label} requires {required} bytes, but buffer has {}",
+            buffer.byte_len()
+        ));
+    }
+    Ok(())
+}
+
+fn require_model(
+    buffer: &Buffer,
+    elements: usize,
+    storage: MetalStorage,
+    label: &str,
+) -> Result<(), String> {
+    let element_bytes = match storage {
+        MetalStorage::Fp32 => size_of::<f32>(),
+        MetalStorage::MixedF16 => size_of::<u16>(),
+    };
+    let required = checked_mul(elements, element_bytes)?;
     if buffer.byte_len() < required {
         return Err(format!(
             "{label} requires {required} bytes, but buffer has {}",

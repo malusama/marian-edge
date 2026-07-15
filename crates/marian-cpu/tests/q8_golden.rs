@@ -28,6 +28,7 @@ fn matches_known_token_translation() {
         .expect("MARIAN_Q8_MODEL");
     let shortlist = manifest.shortlist.as_ref().map(|path| model_dir.join(path));
     let engine = Q8CpuEngine::load(q8_path, shortlist.as_deref(), &manifest.architecture).unwrap();
+    eprintln!("Q8 memory report: {:?}", engine.memory_report());
     let output = engine
         .translate_token_ids(&[277, 2_904, 272, 1_800, 686, 265, 0], &[0, 7], &[512])
         .unwrap();

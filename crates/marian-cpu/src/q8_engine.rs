@@ -1,10 +1,14 @@
-use std::{collections::HashSet, path::Path};
+use std::{cell::RefCell, collections::HashSet, path::Path, time::Instant};
 
 use marian_model::{Architecture, LexicalShortlist};
 
 use crate::{
-    MarianBinaryModel, MarianTensorData, Q8Error, Q8Linear, quantize_symmetric_u8,
-    tensor::{Matrix, attention, relu_in_place, residual_layer_norm, ssru_update_layer_norm},
+    MarianBinaryModel, MarianTensorData, Q8Error, Q8Linear, Q8LinearScratch,
+    quantize_symmetric_u8_into,
+    tensor::{
+        Matrix, attention_into, relu_in_place, residual_layer_norm_into,
+        ssru_update_layer_norm_into,
+    },
 };
 
 const MAXIMUM_POSITION: usize = 4_096;
@@ -44,17 +48,27 @@ impl Q8Embedding {
         })
     }
 
-    fn row(&self, row: usize) -> Result<Vec<f32>, String> {
+    fn row_into(&self, row: usize, destination: &mut [f32]) -> Result<(), String> {
         if row >= self.rows {
             return Err(format!(
                 "Q8 embedding row {row} exceeds vocabulary {}",
                 self.rows
             ));
         }
-        Ok(self.values[row * self.cols..(row + 1) * self.cols]
-            .iter()
-            .map(|&value| f32::from(value) / self.quant_mult)
-            .collect())
+        if destination.len() != self.cols {
+            return Err(format!(
+                "Q8 embedding destination has {} values; expected {}",
+                destination.len(),
+                self.cols
+            ));
+        }
+        for (output, &value) in destination
+            .iter_mut()
+            .zip(&self.values[row * self.cols..(row + 1) * self.cols])
+        {
+            *output = f32::from(value) / self.quant_mult;
+        }
+        Ok(())
     }
 }
 
@@ -126,6 +140,19 @@ pub struct Q8CpuEngine {
     heads: usize,
     source_vocab: usize,
     max_length_factor: usize,
+    linear_scratch: RefCell<Q8LinearScratch>,
+    attention_scores: RefCell<Vec<f32>>,
+    shortlist_quantized: RefCell<Vec<u8>>,
+    buffer_pool: RefCell<Vec<Vec<f32>>>,
+    packed_weight_build_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Q8MemoryReport {
+    pub canonical_weight_bytes: usize,
+    pub packed_weight_bytes: usize,
+    pub embedding_bytes: usize,
+    pub packed_weight_build_ms: f64,
 }
 
 impl Q8CpuEngine {
@@ -137,7 +164,9 @@ impl Q8CpuEngine {
         validate_architecture(architecture)?;
         let binary = MarianBinaryModel::open(weights_path).map_err(q8_string)?;
         validate_tensor_schema(&binary, architecture)?;
+        let packing_started = Instant::now();
         let model = Q8ModelWeights::load(&binary, architecture)?;
+        let packed_weight_build_ms = packing_started.elapsed().as_secs_f64() * 1_000.0;
         let shortlist = LexicalShortlist::load(
             shortlist_path,
             architecture.source_vocab_size,
@@ -151,7 +180,29 @@ impl Q8CpuEngine {
             heads: architecture.attention_heads,
             source_vocab: architecture.source_vocab_size,
             max_length_factor: architecture.max_length_factor.max(1),
+            linear_scratch: RefCell::new(Q8LinearScratch::default()),
+            attention_scores: RefCell::new(Vec::new()),
+            shortlist_quantized: RefCell::new(Vec::new()),
+            buffer_pool: RefCell::new(Vec::new()),
+            packed_weight_build_ms,
         })
+    }
+
+    pub fn memory_report(&self) -> Q8MemoryReport {
+        let mut canonical_weight_bytes = 0;
+        let mut packed_weight_bytes = 0;
+        self.model.for_each_linear(|linear| {
+            let (canonical, packed) = linear.weight_storage_bytes();
+            canonical_weight_bytes += canonical;
+            packed_weight_bytes += packed;
+        });
+        Q8MemoryReport {
+            canonical_weight_bytes,
+            packed_weight_bytes,
+            embedding_bytes: self.model.encoder_embedding.values.len()
+                + self.model.decoder_embedding.values.len(),
+            packed_weight_build_ms: self.packed_weight_build_ms,
+        }
     }
 
     pub fn warmup(&self) -> Result<(), String> {
@@ -199,9 +250,9 @@ impl Q8CpuEngine {
 
             let mut decoder = self.decoder_input(&previous, batch, step)?;
             for (index, layer) in self.model.decoder.iter().enumerate() {
-                let update = run(&layer.ssru.w, &decoder, batch)?;
-                let forget = run(&layer.ssru.wf, &decoder, batch)?;
-                decoder = ssru_update_layer_norm(
+                let update = self.run(&layer.ssru.w, &decoder, batch)?;
+                let forget = self.run(&layer.ssru.wf, &decoder, batch)?;
+                let next = self.ssru(
                     &update,
                     &forget,
                     &mut states[index],
@@ -209,11 +260,14 @@ impl Q8CpuEngine {
                     &layer.ssru.norm_scale,
                     &layer.ssru.norm_bias,
                     batch,
-                    self.dim,
                 )?;
+                self.recycle(update);
+                self.recycle(forget);
+                self.recycle(decoder);
+                decoder = next;
 
-                let query = run(&layer.context.wq, &decoder, batch)?;
-                let attended = attention(
+                let query = self.run(&layer.context.wq, &decoder, batch)?;
+                let attended = self.attention(
                     &query,
                     &encoded.cross[index].key,
                     &encoded.cross[index].value,
@@ -221,19 +275,23 @@ impl Q8CpuEngine {
                     batch,
                     1,
                     encoded.source_length,
-                    self.dim,
-                    self.heads,
                 )?;
-                let context = run(&layer.context.wo, &attended, batch)?;
-                decoder = residual_layer_norm(
+                self.recycle(query);
+                let context = self.run(&layer.context.wo, &attended, batch)?;
+                self.recycle(attended);
+                let next = self.residual(
                     &context,
                     &decoder,
                     &layer.context.norm_scale,
                     &layer.context.norm_bias,
                     batch,
-                    self.dim,
                 )?;
-                decoder = self.feed_forward(&decoder, &layer.ffn, batch)?;
+                self.recycle(context);
+                self.recycle(decoder);
+                decoder = next;
+                let next = self.feed_forward(&decoder, &layer.ffn, batch)?;
+                self.recycle(decoder);
+                decoder = next;
             }
 
             for row in 0..batch {
@@ -248,6 +306,7 @@ impl Q8CpuEngine {
                     finished[row] = true;
                 }
             }
+            self.recycle(decoder);
         }
 
         let mut output = crate::BatchOutput {
@@ -325,10 +384,10 @@ impl Q8CpuEngine {
         let mut encoder = self.embedding(&padded, batch, source_length)?;
         for layer in &self.model.encoder {
             let rows = batch * source_length;
-            let query = run(&layer.attention.wq, &encoder, rows)?;
-            let key = run(&layer.attention.wk, &encoder, rows)?;
-            let value = run(&layer.attention.wv, &encoder, rows)?;
-            let attended = attention(
+            let query = self.run(&layer.attention.wq, &encoder, rows)?;
+            let key = self.run(&layer.attention.wk, &encoder, rows)?;
+            let value = self.run(&layer.attention.wv, &encoder, rows)?;
+            let attended = self.attention(
                 &query,
                 &key,
                 &value,
@@ -336,29 +395,36 @@ impl Q8CpuEngine {
                 batch,
                 source_length,
                 source_length,
-                self.dim,
-                self.heads,
             )?;
-            let projected = run(&layer.attention.wo, &attended, rows)?;
-            encoder = residual_layer_norm(
+            self.recycle(query);
+            self.recycle(key);
+            self.recycle(value);
+            let projected = self.run(&layer.attention.wo, &attended, rows)?;
+            self.recycle(attended);
+            let next = self.residual(
                 &projected,
                 &encoder,
                 &layer.attention.norm_scale,
                 &layer.attention.norm_bias,
                 rows,
-                self.dim,
             )?;
-            encoder = self.feed_forward(&encoder, &layer.ffn, rows)?;
+            self.recycle(projected);
+            self.recycle(encoder);
+            encoder = next;
+            let next = self.feed_forward(&encoder, &layer.ffn, rows)?;
+            self.recycle(encoder);
+            encoder = next;
         }
 
         let rows = batch * source_length;
         let mut cross = Vec::with_capacity(self.model.decoder.len());
         for layer in &self.model.decoder {
             cross.push(CrossCache {
-                key: run(&layer.context.wk, &encoder, rows)?,
-                value: run(&layer.context.wv, &encoder, rows)?,
+                key: self.run(&layer.context.wk, &encoder, rows)?,
+                value: self.run(&layer.context.wv, &encoder, rows)?,
             });
         }
+        self.recycle(encoder);
         Ok(EncodedBatch {
             source_length,
             lengths,
@@ -380,18 +446,16 @@ impl Q8CpuEngine {
         if tokens.len() != batch * sequence {
             return Err("embedding token shape does not match batch x sequence".into());
         }
-        let mut output = vec![0.0_f32; batch * sequence * self.dim];
+        let mut output = self.take_buffer(batch * sequence * self.dim);
         for (token_offset, &token) in tokens.iter().enumerate() {
             let token =
                 usize::try_from(token).map_err(|_| "embedding token ID is negative".to_string())?;
-            let embedded = self.model.encoder_embedding.row(token)?;
             let position = token_offset % sequence;
             let position_values = &self.positions[position * self.dim..(position + 1) * self.dim];
             let destination = &mut output[token_offset * self.dim..(token_offset + 1) * self.dim];
-            for ((value, embedded), &positional) in
-                destination.iter_mut().zip(embedded).zip(position_values)
-            {
-                *value = embedded * EMBEDDING_SCALE + positional;
+            self.model.encoder_embedding.row_into(token, destination)?;
+            for (value, &positional) in destination.iter_mut().zip(position_values) {
+                *value = *value * EMBEDDING_SCALE + positional;
             }
         }
         Ok(output)
@@ -407,18 +471,18 @@ impl Q8CpuEngine {
             return Err("decoder input shape or position is invalid".into());
         }
         let position_values = &self.positions[position * self.dim..(position + 1) * self.dim];
-        let mut output = vec![0.0_f32; batch * self.dim];
+        let mut output = self.take_buffer(batch * self.dim);
         for row in 0..batch {
             let destination = &mut output[row * self.dim..(row + 1) * self.dim];
             if previous[row] < 0 {
                 destination.copy_from_slice(position_values);
                 continue;
             }
-            let embedding = self.model.decoder_embedding.row(previous[row] as usize)?;
-            for ((value, embedded), &positional) in
-                destination.iter_mut().zip(embedding).zip(position_values)
-            {
-                *value = embedded * EMBEDDING_SCALE + positional;
+            self.model
+                .decoder_embedding
+                .row_into(previous[row] as usize, destination)?;
+            for (value, &positional) in destination.iter_mut().zip(position_values) {
+                *value = *value * EMBEDDING_SCALE + positional;
             }
         }
         Ok(output)
@@ -430,17 +494,115 @@ impl Q8CpuEngine {
         weights: &Q8FeedForwardWeights,
         rows: usize,
     ) -> Result<Vec<f32>, String> {
-        let mut hidden = run(&weights.w1, input, rows)?;
+        let mut hidden = self.run(&weights.w1, input, rows)?;
         relu_in_place(&mut hidden);
-        let output = run(&weights.w2, &hidden, rows)?;
-        residual_layer_norm(
+        let output = self.run(&weights.w2, &hidden, rows)?;
+        let normalized = self.residual(
             &output,
             input,
             &weights.norm_scale,
             &weights.norm_bias,
             rows,
+        )?;
+        self.recycle(hidden);
+        self.recycle(output);
+        Ok(normalized)
+    }
+
+    fn run(&self, linear: &Q8Linear, input: &[f32], rows: usize) -> Result<Vec<f32>, String> {
+        let mut output = self.take_buffer(rows.saturating_mul(linear.output_dim()));
+        linear
+            .run_into(
+                input,
+                rows,
+                &mut output,
+                &mut self.linear_scratch.borrow_mut(),
+            )
+            .map_err(q8_string)?;
+        Ok(output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attention(
+        &self,
+        query: &[f32],
+        key: &[f32],
+        value: &[f32],
+        lengths: &[usize],
+        batch: usize,
+        query_length: usize,
+        key_length: usize,
+    ) -> Result<Vec<f32>, String> {
+        let mut output = self.take_buffer(batch * query_length * self.dim);
+        attention_into(
+            query,
+            key,
+            value,
+            lengths,
+            batch,
+            query_length,
+            key_length,
             self.dim,
-        )
+            self.heads,
+            &mut output,
+            &mut self.attention_scores.borrow_mut(),
+        )?;
+        Ok(output)
+    }
+
+    fn residual(
+        &self,
+        input: &[f32],
+        residual: &[f32],
+        scale: &Matrix,
+        bias: &Matrix,
+        rows: usize,
+    ) -> Result<Vec<f32>, String> {
+        let mut output = self.take_buffer(rows * self.dim);
+        residual_layer_norm_into(input, residual, scale, bias, rows, self.dim, &mut output)?;
+        Ok(output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ssru(
+        &self,
+        candidate: &[f32],
+        forget: &[f32],
+        state: &mut [f32],
+        residual: &[f32],
+        scale: &Matrix,
+        bias: &Matrix,
+        rows: usize,
+    ) -> Result<Vec<f32>, String> {
+        let mut output = self.take_buffer(rows * self.dim);
+        ssru_update_layer_norm_into(
+            candidate,
+            forget,
+            state,
+            residual,
+            scale,
+            bias,
+            rows,
+            self.dim,
+            &mut output,
+        )?;
+        Ok(output)
+    }
+
+    fn take_buffer(&self, elements: usize) -> Vec<f32> {
+        let mut pool = self.buffer_pool.borrow_mut();
+        let mut buffer = pool.pop().unwrap_or_else(|| Vec::with_capacity(elements));
+        buffer.clear();
+        buffer.resize(elements, 0.0);
+        buffer
+    }
+
+    fn recycle(&self, mut buffer: Vec<f32>) {
+        buffer.clear();
+        let mut pool = self.buffer_pool.borrow_mut();
+        if pool.len() < 32 {
+            pool.push(buffer);
+        }
     }
 
     fn select_token(&self, decoder: &[f32], candidates: &[u32]) -> Result<u32, String> {
@@ -454,8 +616,13 @@ impl Q8CpuEngine {
         if candidates.is_empty() {
             return Err("cannot select from an empty candidate list".into());
         }
-        let quantized = quantize_symmetric_u8(decoder, self.model.decoder_output_activation_mult)
-            .map_err(q8_string)?;
+        let mut quantized = self.shortlist_quantized.borrow_mut();
+        quantize_symmetric_u8_into(
+            decoder,
+            self.model.decoder_output_activation_mult,
+            &mut quantized,
+        )
+        .map_err(q8_string)?;
         let activation_mult = self.model.decoder_output_activation_mult;
         let weight_mult = self.model.decoder_embedding.quant_mult;
         let inverse_scale = 1.0 / (activation_mult * weight_mult);
@@ -483,6 +650,35 @@ impl Q8CpuEngine {
 }
 
 impl Q8ModelWeights {
+    fn for_each_linear(&self, mut visit: impl FnMut(&Q8Linear)) {
+        for layer in &self.encoder {
+            for linear in [
+                &layer.attention.wq,
+                &layer.attention.wk,
+                &layer.attention.wv,
+                &layer.attention.wo,
+                &layer.ffn.w1,
+                &layer.ffn.w2,
+            ] {
+                visit(linear);
+            }
+        }
+        for layer in &self.decoder {
+            for linear in [
+                &layer.ssru.w,
+                &layer.ssru.wf,
+                &layer.context.wq,
+                &layer.context.wk,
+                &layer.context.wv,
+                &layer.context.wo,
+                &layer.ffn.w1,
+                &layer.ffn.w2,
+            ] {
+                visit(linear);
+            }
+        }
+    }
+
     fn load(model: &MarianBinaryModel, architecture: &Architecture) -> Result<Self, String> {
         let dim = architecture.model_dim;
         let ffn_dim = architecture.ffn_dim;
@@ -614,10 +810,6 @@ fn dense(
     model
         .dense_linear(weight, bias, input_dim, output_dim)
         .map_err(q8_string)
-}
-
-fn run(linear: &Q8Linear, input: &[f32], rows: usize) -> Result<Vec<f32>, String> {
-    linear.run(input, rows).map_err(q8_string)
 }
 
 fn take_float_matrix(

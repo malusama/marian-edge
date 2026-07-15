@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, mem::size_of};
 
 use rten_gemm::{GemmExecutor, GemmInputA, GemmInputB, PackedBMatrix, QuantParams};
 use rten_tensor::NdTensorView;
@@ -37,6 +37,14 @@ pub struct Q8Linear {
     executor: GemmExecutor<u8, i8, i32>,
     packed_weights: PackedBMatrix<i8>,
     execution_path: Q8ExecutionPath,
+}
+
+/// Reusable activation and accumulator storage for [`Q8Linear::run_into`].
+#[derive(Debug, Default)]
+pub struct Q8LinearScratch {
+    quantized: Vec<u8>,
+    accumulators: Vec<i32>,
+    zero_points: Vec<u8>,
 }
 
 impl fmt::Debug for Q8Linear {
@@ -181,11 +189,32 @@ impl Q8Linear {
         &self.weights
     }
 
+    /// Return canonical and architecture-packed weight storage in bytes.
+    pub fn weight_storage_bytes(&self) -> (usize, usize) {
+        let canonical = self.weights.len();
+        let packed = self.packed_weights.clone().into_vec().len() * size_of::<u32>();
+        (canonical, packed)
+    }
+
     /// Compute a row-major `[rows, input_dim] @ [input_dim, output_dim]`.
     pub fn run(&self, input: &[f32], rows: usize) -> Result<Vec<f32>, Q8Error> {
+        let mut output = Vec::new();
+        self.run_into(input, rows, &mut output, &mut Q8LinearScratch::default())?;
+        Ok(output)
+    }
+
+    /// Compute into caller-owned storage while reusing quantization scratch.
+    pub fn run_into(
+        &self,
+        input: &[f32],
+        rows: usize,
+        output: &mut Vec<f32>,
+        scratch: &mut Q8LinearScratch,
+    ) -> Result<(), Q8Error> {
         if rows == 0 {
             if input.is_empty() {
-                return Ok(Vec::new());
+                output.clear();
+                return Ok(());
             }
             return Err(Q8Error::tensor(
                 &self.name,
@@ -206,83 +235,93 @@ impl Q8Linear {
             ));
         }
 
-        let quantized = quantize_symmetric_u8(input, self.activation_quant_mult)?;
+        quantize_symmetric_u8_into(input, self.activation_quant_mult, &mut scratch.quantized)?;
         let output_len = rows.checked_mul(self.output_dim).ok_or_else(|| {
             Q8Error::tensor(&self.name, "output dimensions overflow the address space")
         })?;
-        let accumulators = match self.execution_path {
-            Q8ExecutionPath::Rten => self.run_rten(&quantized, rows, output_len)?,
-            Q8ExecutionPath::ExactAvx2 => crate::q8_avx2::gemm_u8_i8(
-                &quantized,
+        scratch.accumulators.resize(output_len, 0);
+        match self.execution_path {
+            Q8ExecutionPath::Rten => self.run_rten_into(
+                &scratch.quantized,
+                rows,
+                &mut scratch.accumulators,
+                &mut scratch.zero_points,
+            )?,
+            Q8ExecutionPath::ExactAvx2 => crate::q8_avx2::gemm_u8_i8_into(
+                &scratch.quantized,
                 &self.weights,
                 rows,
                 self.input_dim,
                 self.output_dim,
                 ACTIVATION_ZERO_POINT,
+                &mut scratch.accumulators,
             )
             .map_err(|error| Q8Error::Gemm(format!("{}: {error}", self.name)))?,
             Q8ExecutionPath::ScalarSaturationFallback => {
-                self.run_scalar(&quantized, rows, output_len)
+                self.run_scalar_into(&scratch.quantized, rows, &mut scratch.accumulators)
             }
-        };
+        }
 
         let inverse_scale = 1.0 / (self.activation_quant_mult * self.weight_quant_mult);
-        let mut output = Vec::with_capacity(output_len);
-        for row in accumulators.chunks_exact(self.output_dim) {
+        output.clear();
+        output.reserve(output_len);
+        for row in scratch.accumulators.chunks_exact(self.output_dim) {
             for (column, &accumulator) in row.iter().enumerate() {
                 let bias = self.bias.as_ref().map_or(0.0, |values| values[column]);
                 output.push(accumulator as f32 * inverse_scale + bias);
             }
         }
-        Ok(output)
+        Ok(())
     }
 
-    fn run_rten(
+    fn run_rten_into(
         &self,
         quantized: &[u8],
         rows: usize,
-        output_len: usize,
-    ) -> Result<Vec<i32>, Q8Error> {
+        output: &mut [i32],
+        zero_points: &mut Vec<u8>,
+    ) -> Result<(), Q8Error> {
         let lhs = NdTensorView::from_data([rows, self.input_dim], quantized);
-        let zero_points = vec![ACTIVATION_ZERO_POINT; rows];
-        let mut output = vec![0_i32; output_len];
+        zero_points.clear();
+        zero_points.resize(rows, ACTIVATION_ZERO_POINT);
+        output.fill(0);
         let result = if rows == 1 {
             // rten has a specialized GEMV path for an unpacked B. Keep the
             // original Q8 bytes alongside the reusable packed matrix for it.
             let weights =
                 NdTensorView::from_data([self.output_dim, self.input_dim], self.weights.as_slice());
             self.executor.gemm(
-                &mut output,
+                output,
                 GemmInputA::Unpacked(lhs),
                 GemmInputB::Unpacked(weights.transposed()),
                 1.0,
                 0,
                 None,
                 Some(QuantParams {
-                    zero_point: &zero_points,
+                    zero_point: zero_points,
                 }),
                 None,
             )
         } else {
             self.executor.gemm(
-                &mut output,
+                output,
                 GemmInputA::Unpacked(lhs),
                 GemmInputB::Packed(&self.packed_weights),
                 1.0,
                 0,
                 None,
                 Some(QuantParams {
-                    zero_point: &zero_points,
+                    zero_point: zero_points,
                 }),
                 None,
             )
         };
         result.map_err(|error| Q8Error::Gemm(format!("{}: {error}", self.name)))?;
-        Ok(output)
+        Ok(())
     }
 
-    fn run_scalar(&self, quantized: &[u8], rows: usize, output_len: usize) -> Vec<i32> {
-        let mut output = vec![0_i32; output_len];
+    fn run_scalar_into(&self, quantized: &[u8], rows: usize, output: &mut [i32]) {
+        output.fill(0);
         for row in 0..rows {
             for column in 0..self.output_dim {
                 let mut accumulator = 0_i32;
@@ -295,7 +334,6 @@ impl Q8Linear {
                 output[row * self.output_dim + column] = accumulator;
             }
         }
-        output
     }
 }
 
@@ -307,8 +345,19 @@ pub fn quantize_symmetric_u8(
     input: &[f32],
     activation_quant_mult: f32,
 ) -> Result<Vec<u8>, Q8Error> {
+    let mut output = Vec::new();
+    quantize_symmetric_u8_into(input, activation_quant_mult, &mut output)?;
+    Ok(output)
+}
+
+pub fn quantize_symmetric_u8_into(
+    input: &[f32],
+    activation_quant_mult: f32,
+    output: &mut Vec<u8>,
+) -> Result<(), Q8Error> {
     validate_quant_mult("activation", "activation", activation_quant_mult)?;
-    let mut output = Vec::with_capacity(input.len());
+    output.clear();
+    output.reserve(input.len());
     for (index, &value) in input.iter().enumerate() {
         if !value.is_finite() {
             return Err(Q8Error::tensor(
@@ -321,7 +370,7 @@ pub fn quantize_symmetric_u8(
             .clamp(MIN_SYMMETRIC_Q8, MAX_SYMMETRIC_Q8) as i16;
         output.push((signed + i16::from(ACTIVATION_ZERO_POINT)) as u8);
     }
-    Ok(output)
+    Ok(())
 }
 
 fn validate_quant_mult(name: &str, kind: &str, value: f32) -> Result<(), Q8Error> {
@@ -336,7 +385,7 @@ fn validate_quant_mult(name: &str, kind: &str, value: f32) -> Result<(), Q8Error
 
 #[cfg(test)]
 mod tests {
-    use super::{Q8ExecutionPath, Q8Linear, quantize_symmetric_u8};
+    use super::{Q8ExecutionPath, Q8Linear, Q8LinearScratch, quantize_symmetric_u8};
 
     #[test]
     fn activation_quantization_uses_ties_to_even_and_saturates() {
@@ -422,5 +471,35 @@ mod tests {
         assert!(linear.run(&[1.0], 1).is_err());
         assert!(linear.run(&[1.0], 0).is_err());
         assert!(linear.run(&[], 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn run_into_reuses_all_scratch_capacity() {
+        let linear = Q8Linear::new("reuse", 4, 2, vec![2; 8], 4.0, 8.0, None).unwrap();
+        let mut scratch = Q8LinearScratch::default();
+        let mut output = Vec::new();
+        linear
+            .run_into(&[0.0, 0.25, -0.5, 1.0], 1, &mut output, &mut scratch)
+            .unwrap();
+        let capacities = (
+            scratch.quantized.capacity(),
+            scratch.accumulators.capacity(),
+            scratch.zero_points.capacity(),
+            output.capacity(),
+        );
+        let expected = output.clone();
+        linear
+            .run_into(&[0.0, 0.25, -0.5, 1.0], 1, &mut output, &mut scratch)
+            .unwrap();
+        assert_eq!(output, expected);
+        assert_eq!(
+            capacities,
+            (
+                scratch.quantized.capacity(),
+                scratch.accumulators.capacity(),
+                scratch.zero_points.capacity(),
+                output.capacity(),
+            )
+        );
     }
 }

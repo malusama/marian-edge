@@ -8,11 +8,21 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[features]
+default = []
+benchmarks = []
+
+[[bench]]
+name = "hotspots"
+harness = false
+required-features = ["benchmarks"]
+
 [dependencies]
 marian-core.workspace = true
 marian-model.workspace = true
 marian-tokenizer.workspace = true
 matrixmultiply.workspace = true
+memmap2.workspace = true
 rten-gemm.workspace = true
 rten-tensor.workspace = true
 rayon.workspace = true

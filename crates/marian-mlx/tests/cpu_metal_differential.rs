@@ -126,14 +126,33 @@ fn cpu_fp32_matches_direct_metal_for_deterministic_corpus() {
 
     let cpu_batch = translate_production_batches(&mut cpu, &inputs);
     let metal_batch = translate_production_batches(&mut metal, &inputs);
+    let mixed_f16 = std::env::var("MARIAN_MLX_METAL_PRECISION").as_deref() == Ok("mixed-f16");
     assert_eq!(cpu_batch.len(), corpus.len());
     assert_eq!(metal_batch.len(), corpus.len());
+    let mut mismatches = Vec::new();
     for (index, ((source, cpu_output), metal_output)) in
         corpus.iter().zip(&cpu_batch).zip(&metal_batch).enumerate()
     {
-        assert_eq!(
-            cpu_output, metal_output,
-            "CPU and Metal differ for corpus item {index}: {source:?}"
+        if cpu_output != metal_output {
+            if mixed_f16 {
+                mismatches.push(index);
+            } else {
+                assert_eq!(
+                    cpu_output, metal_output,
+                    "CPU and Metal differ for corpus item {index}: {source:?}"
+                );
+            }
+        }
+    }
+    if mixed_f16 {
+        let exact = corpus.len() - mismatches.len();
+        eprintln!(
+            "mixed-f16 exact translations: {exact}/{}; mismatches: {mismatches:?}",
+            corpus.len()
+        );
+        assert!(
+            exact >= 160,
+            "mixed-f16 must retain at least 80% exact translations on the deterministic corpus"
         );
     }
 
@@ -152,9 +171,11 @@ fn cpu_fp32_matches_direct_metal_for_deterministic_corpus() {
             metal_single[0], metal_batch[index],
             "Metal batch drift at {index}"
         );
-        assert_eq!(
-            cpu_single[0], metal_single[0],
-            "CPU and Metal single-item drift at {index}"
-        );
+        if !mixed_f16 {
+            assert_eq!(
+                cpu_single[0], metal_single[0],
+                "CPU and Metal single-item drift at {index}"
+            );
+        }
     }
 }

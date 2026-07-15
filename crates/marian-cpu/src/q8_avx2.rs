@@ -96,6 +96,7 @@ pub(crate) fn dot_u8_i8(
 /// `[output_dim, inner_dim]` order. The output is row-major
 /// `[rows, output_dim]`. Four output channels are evaluated together so each
 /// widened activation vector is reused across four independent dot products.
+#[cfg(test)]
 pub(crate) fn gemm_u8_i8(
     activations: &[u8],
     weights_output_input: &[i8],
@@ -104,6 +105,32 @@ pub(crate) fn gemm_u8_i8(
     output_dim: usize,
     activation_zero_point: u8,
 ) -> Result<Vec<i32>, Avx2Q8Error> {
+    let output_len = rows
+        .checked_mul(output_dim)
+        .ok_or_else(|| Avx2Q8Error::InvalidShape("output dimensions overflow usize".to_owned()))?;
+    let mut output = vec![0_i32; output_len];
+    gemm_u8_i8_into(
+        activations,
+        weights_output_input,
+        rows,
+        inner_dim,
+        output_dim,
+        activation_zero_point,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_u8_i8_into(
+    activations: &[u8],
+    weights_output_input: &[i8],
+    rows: usize,
+    inner_dim: usize,
+    output_dim: usize,
+    activation_zero_point: u8,
+    output: &mut [i32],
+) -> Result<(), Avx2Q8Error> {
     let expected_activations = rows.checked_mul(inner_dim).ok_or_else(|| {
         Avx2Q8Error::InvalidShape("activation dimensions overflow usize".to_owned())
     })?;
@@ -125,66 +152,78 @@ pub(crate) fn gemm_u8_i8(
             weights_output_input.len()
         )));
     }
+    if output.len() != output_len {
+        return Err(Avx2Q8Error::InvalidShape(format!(
+            "output buffer has {} values, expected {rows} x {output_dim} = {output_len}",
+            output.len()
+        )));
+    }
     if !is_available() {
         return Err(Avx2Q8Error::Unavailable);
     }
 
     #[cfg(target_arch = "x86_64")]
     {
-        let mut output = vec![0_i32; output_len];
         if output_len == 0 {
-            return Ok(output);
+            return Ok(());
         }
-        output
-            .par_chunks_mut(output_dim)
-            .enumerate()
-            .try_for_each(|(row, output_row)| {
-                let activation_start = row * inner_dim;
-                let activation_row = &activations[activation_start..activation_start + inner_dim];
-                let mut column = 0;
+        let evaluate_row = |row: usize, output_row: &mut [i32]| {
+            let activation_start = row * inner_dim;
+            let activation_row = &activations[activation_start..activation_start + inner_dim];
+            let mut column = 0;
 
-                while column + 4 <= output_dim {
-                    let weight_start = column * inner_dim;
-                    let weight_rows =
-                        &weights_output_input[weight_start..weight_start + 4 * inner_dim];
-                    // SAFETY: AVX2 was runtime-detected above. `activation_row`
-                    // has `inner_dim` elements and `weight_rows` has exactly four
-                    // contiguous rows of that length. The kernel bounds every
-                    // vector load and handles the remaining tail scalarly.
-                    let accumulators = unsafe {
-                        dot4_i64_avx2(
-                            activation_row,
-                            weight_rows,
-                            inner_dim,
-                            activation_zero_point,
-                        )
-                    };
-                    for (offset, accumulator) in accumulators.into_iter().enumerate() {
-                        output_row[column + offset] = i32::try_from(accumulator)
-                            .map_err(|_| Avx2Q8Error::AccumulatorOverflow(accumulator))?;
-                    }
-                    column += 4;
-                }
-
-                while column < output_dim {
-                    let weight_start = column * inner_dim;
-                    let weight_row = &weights_output_input[weight_start..weight_start + inner_dim];
-                    // SAFETY: AVX2 was runtime-detected above and both slices have
-                    // the same length. The kernel bounds vector and tail loads.
-                    let accumulator =
-                        unsafe { dot_i64_avx2(activation_row, weight_row, activation_zero_point) };
-                    output_row[column] = i32::try_from(accumulator)
+            while column + 4 <= output_dim {
+                let weight_start = column * inner_dim;
+                let weight_rows = &weights_output_input[weight_start..weight_start + 4 * inner_dim];
+                // SAFETY: AVX2 was runtime-detected above. `activation_row`
+                // has `inner_dim` elements and `weight_rows` has exactly four
+                // contiguous rows of that length. The kernel bounds every
+                // vector load and handles the remaining tail scalarly.
+                let accumulators = unsafe {
+                    dot4_i64_avx2(
+                        activation_row,
+                        weight_rows,
+                        inner_dim,
+                        activation_zero_point,
+                    )
+                };
+                for (offset, accumulator) in accumulators.into_iter().enumerate() {
+                    output_row[column + offset] = i32::try_from(accumulator)
                         .map_err(|_| Avx2Q8Error::AccumulatorOverflow(accumulator))?;
-                    column += 1;
                 }
-                Ok::<(), Avx2Q8Error>(())
-            })?;
-        Ok(output)
+                column += 4;
+            }
+
+            while column < output_dim {
+                let weight_start = column * inner_dim;
+                let weight_row = &weights_output_input[weight_start..weight_start + inner_dim];
+                // SAFETY: AVX2 was runtime-detected above and both slices have
+                // the same length. The kernel bounds vector and tail loads.
+                let accumulator =
+                    unsafe { dot_i64_avx2(activation_row, weight_row, activation_zero_point) };
+                output_row[column] = i32::try_from(accumulator)
+                    .map_err(|_| Avx2Q8Error::AccumulatorOverflow(accumulator))?;
+                column += 1;
+            }
+            Ok::<(), Avx2Q8Error>(())
+        };
+        const PARALLEL_OUTPUT_THRESHOLD: usize = 8_192;
+        if rows > 1 && output_len >= PARALLEL_OUTPUT_THRESHOLD {
+            output
+                .par_chunks_mut(output_dim)
+                .enumerate()
+                .try_for_each(|(row, output_row)| evaluate_row(row, output_row))?;
+        } else {
+            for (row, output_row) in output.chunks_exact_mut(output_dim).enumerate() {
+                evaluate_row(row, output_row)?;
+            }
+        }
+        Ok(())
     }
 
     #[cfg(not(target_arch = "x86_64"))]
     {
-        let _ = (output_len, activation_zero_point);
+        let _ = (output_len, activation_zero_point, output);
         unreachable!("non-x86 targets return before entering the AVX2 kernel")
     }
 }

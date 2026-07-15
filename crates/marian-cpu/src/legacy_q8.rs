@@ -1,9 +1,10 @@
 use std::{
     collections::HashMap,
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
+
+use memmap2::MmapOptions;
 
 use crate::{Q8Error, Q8Linear};
 
@@ -156,19 +157,14 @@ impl MarianBinaryModel {
             path: PathBuf::from(path),
             source,
         })?;
-        let mut bytes = Vec::with_capacity(file_len);
-        file.take((MAXIMUM_FILE_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|source| Q8Error::Io {
-                path: PathBuf::from(path),
-                source,
-            })?;
-        if bytes.len() > MAXIMUM_FILE_BYTES {
-            return Err(Q8Error::InvalidFormat(format!(
-                "model {} exceeds the {MAXIMUM_FILE_BYTES}-byte maximum while reading",
-                path.display()
-            )));
-        }
+        // SAFETY: The mapping is read-only, its length was bounded above, and
+        // parsing completes before `file` or the mapping is dropped. The
+        // owned tensor representation never keeps references into the map.
+        let bytes = unsafe { MmapOptions::new().map(&file) }.map_err(|source| Q8Error::Io {
+            path: PathBuf::from(path),
+            source,
+        })?;
+        debug_assert_eq!(bytes.len(), file_len);
         Self::parse(&bytes)
     }
 

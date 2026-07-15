@@ -46,4 +46,31 @@ fn matches_known_sentences() {
             .unwrap();
         assert_eq!(single[0].text, batched_output.text);
     }
+
+    let paragraph_inputs = [
+        TranslationInput::new(
+            "First sentence.\nSecond sentence?\r\nThird sentence!",
+            "en",
+            "zh",
+        ),
+        TranslationInput::new(
+            vec!["The weather is beautiful today."; 80].join(" "),
+            "en",
+            "zh",
+        ),
+    ];
+    let paragraphs = backend.translate_batch(&paragraph_inputs).unwrap();
+    assert_eq!(paragraphs[0].text, "第一句话。\n第二句话?\r\n第三句话!");
+    assert_eq!(paragraphs[1].text, vec!["今天天气很美。"; 80].join(" "));
+
+    let mut limited = TranslationInput::new(
+        "The weather is beautiful today. The weather is beautiful today.",
+        "en",
+        "zh",
+    );
+    limited.max_output_tokens = 1;
+    let limited = backend.translate_batch(&[limited]).unwrap().remove(0);
+    assert_eq!(limited.output_tokens, 1);
+    assert_eq!(limited.text.trim(), "今天");
+    assert!(limited.text.ends_with(' '));
 }

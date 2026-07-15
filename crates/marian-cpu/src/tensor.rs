@@ -37,6 +37,19 @@ pub(crate) fn matmul(
     inner: usize,
     bias: Option<&Matrix>,
 ) -> Result<Vec<f32>, String> {
+    let mut output = Vec::new();
+    matmul_into(lhs, rhs, rows, inner, bias, &mut output)?;
+    Ok(output)
+}
+
+pub(crate) fn matmul_into(
+    lhs: &[f32],
+    rhs: &Matrix,
+    rows: usize,
+    inner: usize,
+    bias: Option<&Matrix>,
+    output: &mut Vec<f32>,
+) -> Result<(), String> {
     if rhs.rows != inner {
         return Err(format!(
             "matrix inner dimension mismatch: lhs has {inner}, rhs has {}",
@@ -60,7 +73,8 @@ pub(crate) fn matmul(
     }
 
     let output_elements = checked_mul(rows, rhs.cols, "matrix output")?;
-    let mut output = vec![0.0_f32; output_elements];
+    output.clear();
+    output.resize(output_elements, 0.0);
     let lhs_stride = to_isize(inner, "matrix lhs stride")?;
     let rhs_stride = to_isize(rhs.cols, "matrix rhs stride")?;
     let output_stride = to_isize(rhs.cols, "matrix output stride")?;
@@ -92,7 +106,7 @@ pub(crate) fn matmul(
             }
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 pub(crate) fn relu_in_place(values: &mut [f32]) {
@@ -109,6 +123,21 @@ pub(crate) fn residual_layer_norm(
     rows: usize,
     dim: usize,
 ) -> Result<Vec<f32>, String> {
+    let mut output = Vec::new();
+    residual_layer_norm_into(input, residual, scale, bias, rows, dim, &mut output)?;
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn residual_layer_norm_into(
+    input: &[f32],
+    residual: &[f32],
+    scale: &Matrix,
+    bias: &Matrix,
+    rows: usize,
+    dim: usize,
+    output: &mut Vec<f32>,
+) -> Result<(), String> {
     let elements = checked_mul(rows, dim, "layer norm shape")?;
     if input.len() != elements || residual.len() != elements {
         return Err("layer norm input shape does not match rows x dim".into());
@@ -116,15 +145,13 @@ pub(crate) fn residual_layer_norm(
     require_vector(scale, dim, "layer norm scale")?;
     require_vector(bias, dim, "layer norm bias")?;
 
-    let mut output = input
-        .iter()
-        .zip(residual)
-        .map(|(&value, &skip)| value + skip)
-        .collect::<Vec<_>>();
+    output.clear();
+    output.resize(elements, 0.0);
+    add_slices(input, residual, output);
     for row in output.chunks_exact_mut(dim) {
         normalize_row(row, scale.values(), bias.values());
     }
-    Ok(output)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -138,6 +165,33 @@ pub(crate) fn ssru_update_layer_norm(
     rows: usize,
     dim: usize,
 ) -> Result<Vec<f32>, String> {
+    let mut output = Vec::new();
+    ssru_update_layer_norm_into(
+        candidate,
+        forget_pre,
+        state,
+        residual,
+        scale,
+        bias,
+        rows,
+        dim,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ssru_update_layer_norm_into(
+    candidate: &[f32],
+    forget_pre: &[f32],
+    state: &mut [f32],
+    residual: &[f32],
+    scale: &Matrix,
+    bias: &Matrix,
+    rows: usize,
+    dim: usize,
+    output: &mut Vec<f32>,
+) -> Result<(), String> {
     let elements = checked_mul(rows, dim, "SSRU shape")?;
     if candidate.len() != elements
         || forget_pre.len() != elements
@@ -149,7 +203,8 @@ pub(crate) fn ssru_update_layer_norm(
     require_vector(scale, dim, "SSRU layer norm scale")?;
     require_vector(bias, dim, "SSRU layer norm bias")?;
 
-    let mut output = vec![0.0_f32; elements];
+    output.clear();
+    output.resize(elements, 0.0);
     for index in 0..elements {
         let gate = 1.0 / (1.0 + (-forget_pre[index]).exp());
         let next = gate * state[index] + (1.0 - gate) * candidate[index];
@@ -159,7 +214,7 @@ pub(crate) fn ssru_update_layer_norm(
     for row in output.chunks_exact_mut(dim) {
         normalize_row(row, scale.values(), bias.values());
     }
-    Ok(output)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -174,6 +229,38 @@ pub(crate) fn attention(
     dim: usize,
     heads: usize,
 ) -> Result<Vec<f32>, String> {
+    let mut output = Vec::new();
+    let mut scores = Vec::new();
+    attention_into(
+        query,
+        key,
+        value,
+        lengths,
+        batch,
+        query_length,
+        key_length,
+        dim,
+        heads,
+        &mut output,
+        &mut scores,
+    )?;
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attention_into(
+    query: &[f32],
+    key: &[f32],
+    value: &[f32],
+    lengths: &[usize],
+    batch: usize,
+    query_length: usize,
+    key_length: usize,
+    dim: usize,
+    heads: usize,
+    output: &mut Vec<f32>,
+    scores: &mut Vec<f32>,
+) -> Result<(), String> {
     if heads == 0 || dim % heads != 0 {
         return Err(format!(
             "attention dimension {dim} is not divisible by {heads} heads"
@@ -194,8 +281,10 @@ pub(crate) fn attention(
 
     let head_dim = dim / heads;
     let attention_scale = (head_dim as f32).sqrt().recip();
-    let mut output = vec![0.0_f32; query_elements];
-    let mut scores = vec![0.0_f32; key_length];
+    output.clear();
+    output.resize(query_elements, 0.0);
+    scores.clear();
+    scores.resize(key_length, 0.0);
     for (batch_index, &active_keys) in lengths.iter().enumerate().take(batch) {
         for query_index in 0..query_length {
             for head in 0..heads {
@@ -226,7 +315,7 @@ pub(crate) fn attention(
             }
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 pub(crate) fn select_token(
@@ -298,6 +387,57 @@ fn normalize_row(row: &mut [f32], scale: &[f32], bias: &[f32]) {
     }
 }
 
+fn add_slices(lhs: &[f32], rhs: &[f32], output: &mut [f32]) {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    debug_assert_eq!(lhs.len(), output.len());
+    let mut offset = 0;
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::arch::aarch64::{vaddq_f32, vld1q_f32, vst1q_f32};
+        while offset + 4 <= lhs.len() {
+            // SAFETY: The loop condition proves four readable/writable f32
+            // values in each equally-sized slice. NEON is baseline AArch64.
+            unsafe {
+                let sum = vaddq_f32(
+                    vld1q_f32(lhs.as_ptr().add(offset)),
+                    vld1q_f32(rhs.as_ptr().add(offset)),
+                );
+                vst1q_f32(output.as_mut_ptr().add(offset), sum);
+            }
+            offset += 4;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was runtime-detected; the helper bounds all loads.
+            offset = unsafe { add_slices_avx2(lhs, rhs, output) };
+        }
+    }
+    for index in offset..lhs.len() {
+        output[index] = lhs[index] + rhs[index];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn add_slices_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> usize {
+    use core::arch::x86_64::{_mm256_add_ps, _mm256_loadu_ps, _mm256_storeu_ps};
+    let mut offset = 0;
+    while offset + 8 <= lhs.len() {
+        // SAFETY: The loop condition proves eight readable/writable elements.
+        unsafe {
+            let sum = _mm256_add_ps(
+                _mm256_loadu_ps(lhs.as_ptr().add(offset)),
+                _mm256_loadu_ps(rhs.as_ptr().add(offset)),
+            );
+            _mm256_storeu_ps(output.as_mut_ptr().add(offset), sum);
+        }
+        offset += 8;
+    }
+    offset
+}
+
 fn softmax_in_place(values: &mut [f32]) {
     let maximum = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0_f32;
@@ -330,7 +470,8 @@ fn to_isize(value: usize, label: &str) -> Result<isize, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Matrix, attention, matmul, residual_layer_norm, select_token, ssru_update_layer_norm,
+        Matrix, add_slices, attention, matmul, residual_layer_norm, select_token,
+        ssru_update_layer_norm,
     };
 
     fn matrix(values: &[f32], rows: usize, cols: usize) -> Matrix {
@@ -344,6 +485,22 @@ mod tests {
         let bias = matrix(&[0.5, -0.5], 1, 2);
         let actual = matmul(&lhs, &rhs, 2, 3, Some(&bias)).unwrap();
         assert_eq!(actual, vec![58.5, 63.5, 139.5, 153.5]);
+    }
+
+    #[test]
+    fn simd_addition_matches_scalar_for_every_tail() {
+        for length in 0..=65 {
+            let lhs = (0..length)
+                .map(|index| index as f32 * 0.25)
+                .collect::<Vec<_>>();
+            let rhs = (0..length)
+                .map(|index| index as f32 * -0.5)
+                .collect::<Vec<_>>();
+            let mut output = vec![0.0; length];
+            add_slices(&lhs, &rhs, &mut output);
+            let expected = lhs.iter().zip(&rhs).map(|(a, b)| a + b).collect::<Vec<_>>();
+            assert_eq!(output, expected, "length {length}");
+        }
     }
 
     #[test]

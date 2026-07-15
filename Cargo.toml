@@ -21,12 +21,14 @@ homepage = "https://github.com/malusama/marian-mlx"
 anyhow = "1.0.102"
 axum = "0.8.8"
 clap = { version = "4.5.60", features = ["derive", "env"] }
+half = "2.7.1"
 marian-core = { version = "0.2.1", path = "crates/marian-core" }
 marian-cpu = { version = "0.2.1", path = "crates/marian-cpu" }
 marian-model = { version = "0.2.1", path = "crates/marian-model" }
 marian-mlx = { version = "0.2.1", path = "crates/marian-mlx" }
 marian-tokenizer = { version = "0.2.1", path = "crates/marian-tokenizer" }
 matrixmultiply = { version = "0.3.10", features = ["threading"] }
+memmap2 = "0.9.9"
 objc2 = "0.6.3"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",

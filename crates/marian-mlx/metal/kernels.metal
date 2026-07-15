@@ -1,6 +1,13 @@
 #include <metal_stdlib>
 using namespace metal;
 
+inline float model_value(device const uchar* values, uint index, uint storage) {
+  if (storage == 0) {
+    return reinterpret_cast<device const float*>(values)[index];
+  }
+  return float(reinterpret_cast<device const half*>(values)[index]);
+}
+
 constant uint TILE = 16;
 constant uint REDUCTION_THREADS = 128;
 constant float EMBEDDING_SCALE = 19.595917942265423f;
@@ -11,12 +18,14 @@ struct MatMulParams {
   uint cols;
   uint inner;
   uint has_bias;
+  uint activation;
+  uint storage;
 };
 
 kernel void matmul_f32(
     device const float* lhs [[buffer(0)]],
-    device const float* rhs [[buffer(1)]],
-    device const float* bias [[buffer(2)]],
+    device const uchar* rhs [[buffer(1)]],
+    device const uchar* bias [[buffer(2)]],
     device float* output [[buffer(3)]],
     constant MatMulParams& p [[buffer(4)]],
     ushort2 local [[thread_position_in_threadgroup]],
@@ -33,7 +42,8 @@ kernel void matmul_f32(
     lhs_tile[local.y][local.x] =
         row < p.rows && lhs_col < p.inner ? lhs[row * p.inner + lhs_col] : 0.0f;
     rhs_tile[local.y][local.x] =
-        rhs_row < p.inner && col < p.cols ? rhs[rhs_row * p.cols + col] : 0.0f;
+        rhs_row < p.inner && col < p.cols
+            ? model_value(rhs, rhs_row * p.cols + col, p.storage) : 0.0f;
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (uint index = 0; index < TILE; ++index) {
       value += lhs_tile[local.y][index] * rhs_tile[index][local.x];
@@ -42,7 +52,8 @@ kernel void matmul_f32(
   }
 
   if (row < p.rows && col < p.cols) {
-    output[row * p.cols + col] = value + (p.has_bias != 0 ? bias[col] : 0.0f);
+    value += p.has_bias != 0 ? model_value(bias, col, p.storage) : 0.0f;
+    output[row * p.cols + col] = p.activation != 0 ? max(value, 0.0f) : value;
   }
 }
 
@@ -50,11 +61,12 @@ struct EmbeddingParams {
   uint batch;
   uint sequence;
   uint dim;
+  uint storage;
 };
 
 kernel void embedding_positions_f32(
     device const int* token_ids [[buffer(0)]],
-    device const float* embedding [[buffer(1)]],
+    device const uchar* embedding [[buffer(1)]],
     device const float* positions [[buffer(2)]],
     device float* output [[buffer(3)]],
     constant EmbeddingParams& p [[buffer(4)]],
@@ -63,7 +75,7 @@ kernel void embedding_positions_f32(
   const uint token_offset = gid.z * p.sequence + gid.y;
   const uint token = uint(token_ids[token_offset]);
   const uint output_offset = token_offset * p.dim + gid.x;
-  output[output_offset] = embedding[token * p.dim + gid.x] * EMBEDDING_SCALE
+  output[output_offset] = model_value(embedding, token * p.dim + gid.x, p.storage) * EMBEDDING_SCALE
       + positions[gid.y * p.dim + gid.x];
 }
 
@@ -71,42 +83,35 @@ struct DecoderInputParams {
   uint batch;
   uint dim;
   uint position;
+  uint storage;
 };
 
 kernel void decoder_input_f32(
     device const int* previous [[buffer(0)]],
-    device const float* embedding [[buffer(1)]],
+    device const uchar* embedding [[buffer(1)]],
     device const float* positions [[buffer(2)]],
     device float* output [[buffer(3)]],
     constant DecoderInputParams& p [[buffer(4)]],
     uint2 gid [[thread_position_in_grid]]) {
   if (gid.x >= p.dim || gid.y >= p.batch) return;
   const int token = previous[gid.y];
-  const float embedded = token >= 0 ? embedding[uint(token) * p.dim + gid.x] : 0.0f;
+  const float embedded = token >= 0
+      ? model_value(embedding, uint(token) * p.dim + gid.x, p.storage) : 0.0f;
   output[gid.y * p.dim + gid.x] = embedded * EMBEDDING_SCALE
       + positions[p.position * p.dim + gid.x];
-}
-
-struct ElementParams { uint count; };
-
-kernel void relu_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant ElementParams& p [[buffer(2)]],
-    uint gid [[thread_position_in_grid]]) {
-  if (gid < p.count) output[gid] = max(input[gid], 0.0f);
 }
 
 struct NormParams {
   uint rows;
   uint dim;
+  uint storage;
 };
 
 kernel void residual_layer_norm_f32(
     device const float* input [[buffer(0)]],
     device const float* residual [[buffer(1)]],
-    device const float* scale [[buffer(2)]],
-    device const float* bias [[buffer(3)]],
+    device const uchar* scale [[buffer(2)]],
+    device const uchar* bias [[buffer(3)]],
     device float* output [[buffer(4)]],
     constant NormParams& p [[buffer(5)]],
     uint tid [[thread_index_in_threadgroup]],
@@ -141,8 +146,8 @@ kernel void residual_layer_norm_f32(
   }
   const float inv_std = rsqrt(reduction[0] / float(p.dim) + 1.0e-6f);
   for (uint index = tid; index < p.dim; index += REDUCTION_THREADS) {
-    output[base + index] = (output[base + index] - mean) * inv_std * scale[index]
-        + bias[index];
+    output[base + index] = (output[base + index] - mean) * inv_std
+        * model_value(scale, index, p.storage) + model_value(bias, index, p.storage);
   }
 }
 
@@ -151,8 +156,8 @@ kernel void ssru_update_layer_norm_f32(
     device const float* forget_pre [[buffer(1)]],
     device float* state [[buffer(2)]],
     device const float* residual [[buffer(3)]],
-    device const float* scale [[buffer(4)]],
-    device const float* bias [[buffer(5)]],
+    device const uchar* scale [[buffer(4)]],
+    device const uchar* bias [[buffer(5)]],
     device float* output [[buffer(6)]],
     constant NormParams& p [[buffer(7)]],
     uint tid [[thread_index_in_threadgroup]],
@@ -191,8 +196,8 @@ kernel void ssru_update_layer_norm_f32(
   }
   const float inv_std = rsqrt(reduction[0] / float(p.dim) + 1.0e-6f);
   for (uint index = tid; index < p.dim; index += REDUCTION_THREADS) {
-    output[base + index] = (output[base + index] - mean) * inv_std * scale[index]
-        + bias[index];
+    output[base + index] = (output[base + index] - mean) * inv_std
+        * model_value(scale, index, p.storage) + model_value(bias, index, p.storage);
   }
 }
 
@@ -300,12 +305,13 @@ struct OutputParams {
   uint batch;
   uint candidates;
   uint dim;
+  uint storage;
 };
 
 kernel void output_logits_f32(
     device const float* decoder [[buffer(0)]],
-    device const float* embedding [[buffer(1)]],
-    device const float* bias [[buffer(2)]],
+    device const uchar* embedding [[buffer(1)]],
+    device const uchar* bias [[buffer(2)]],
     device const uint* candidate_ids [[buffer(3)]],
     device const uint* candidate_counts [[buffer(4)]],
     device float* logits [[buffer(5)]],
@@ -319,9 +325,10 @@ kernel void output_logits_f32(
     return;
   }
   const uint token = candidate_ids[batch * p.candidates + candidate_index];
-  float value = bias[token];
+  float value = model_value(bias, token, p.storage);
   for (uint index = 0; index < p.dim; ++index) {
-    value += decoder[batch * p.dim + index] * embedding[token * p.dim + index];
+    value += decoder[batch * p.dim + index]
+        * model_value(embedding, token * p.dim + index, p.storage);
   }
   logits[batch * p.candidates + candidate_index] = value;
 }

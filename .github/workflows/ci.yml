@@ -27,6 +27,12 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      - name: Reproducible benchmark assets
+        run: |
+          python3 tools/generate_corpus.py --output /tmp/corpus-v1.jsonl
+          cmp benchmarks/corpus-v1.jsonl /tmp/corpus-v1.jsonl
+          python3 -m py_compile tools/bench_http.py tools/generate_corpus.py
+          cargo check --locked -p marian-cpu --features benchmarks --benches
       - name: Check explicit pure Rust CPU backend
         run: |
           cargo clippy --locked -p marian-server --all-targets --features cpu -- -D warnings
@@ -44,8 +50,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends shellcheck
-          shellcheck scripts/*.sh scripts/marian-mlxctl docker/*.sh
-          for script in scripts/*.sh scripts/marian-mlxctl docker/*.sh; do
+          shellcheck scripts/*.sh scripts/marian-mlxctl docker/*.sh tools/*.sh
+          for script in scripts/*.sh scripts/marian-mlxctl docker/*.sh tools/*.sh; do
             sh -n "$script"
           done
       - name: Compose contract

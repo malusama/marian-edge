@@ -1,0 +1,200 @@
+{"id":0,"text":"0: The small train crosses the old bridge today."}
+{"id":1,"text":"1: The small train crosses the old bridge at noon."}
+{"id":2,"text":"2: The small train crosses the old bridge without warning!"}
+{"id":3,"text":"3: The small train crosses the old bridge near the station?"}
+{"id":4,"text":"4: The small train opens the old bridge today."}
+{"id":5,"text":"5: The small train opens the old bridge at noon."}
+{"id":6,"text":"6: The small train opens the old bridge without warning!"}
+{"id":7,"text":"7: The small train opens the old bridge near the station?"}
+{"id":8,"text":"8: The small train tests the old bridge today."}
+{"id":9,"text":"9: The small train tests the old bridge at noon."}
+{"id":10,"text":"10: The small train tests the old bridge without warning!"}
+{"id":11,"text":"11: The small train tests the old bridge near the station?"}
+{"id":12,"text":"12: The small train observes the old bridge today."}
+{"id":13,"text":"13: The small train observes the old bridge at noon."}
+{"id":14,"text":"14: The small train observes the old bridge without warning!"}
+{"id":15,"text":"15: The small train observes the old bridge near the station?"}
+{"id":16,"text":"16: The small train builds the old bridge today."}
+{"id":17,"text":"17: The small train builds the old bridge at noon."}
+{"id":18,"text":"18: The small train builds the old bridge without warning!"}
+{"id":19,"text":"19: The small train builds the old bridge near the station?"}
+{"id":20,"text":"20: The small train explains the old bridge today."}
+{"id":21,"text":"21: The small train explains the old bridge at noon."}
+{"id":22,"text":"22: The small train explains the old bridge without warning!"}
+{"id":23,"text":"23: The small train explains the old bridge near the station?"}
+{"id":24,"text":"24: The small train finds the old bridge today."}
+{"id":25,"text":"25: The small train finds the old bridge at noon."}
+{"id":26,"text":"26: The small train finds the old bridge without warning!"}
+{"id":27,"text":"27: The small train finds the old bridge near the station?"}
+{"id":28,"text":"28: The small train protects the old bridge today."}
+{"id":29,"text":"29: The small train protects the old bridge at noon."}
+{"id":30,"text":"30: The small train protects the old bridge without warning!"}
+{"id":31,"text":"31: The small train protects the old bridge near the station?"}
+{"id":32,"text":"32: The small window crosses the old bridge today."}
+{"id":33,"text":"33: The small window crosses the old bridge at noon."}
+{"id":34,"text":"34: The small window crosses the old bridge without warning!"}
+{"id":35,"text":"35: The small window crosses the old bridge near the station?"}
+{"id":36,"text":"36: The small window opens the old bridge today."}
+{"id":37,"text":"37: The small window opens the old bridge at noon."}
+{"id":38,"text":"38: The small window opens the old bridge without warning!"}
+{"id":39,"text":"39: The small window opens the old bridge near the station?"}
+{"id":40,"text":"40: The small window tests the old bridge today."}
+{"id":41,"text":"41: The small window tests the old bridge at noon."}
+{"id":42,"text":"42: The small window tests the old bridge without warning!"}
+{"id":43,"text":"43: The small window tests the old bridge near the station?"}
+{"id":44,"text":"44: The small window observes the old bridge today."}
+{"id":45,"text":"45: The small window observes the old bridge at noon."}
+{"id":46,"text":"46: The small window observes the old bridge without warning!"}
+{"id":47,"text":"47: The small window observes the old bridge near the station?"}
+{"id":48,"text":"48: The small window builds the old bridge today."}
+{"id":49,"text":"49: The small window builds the old bridge at noon."}
+{"id":50,"text":"50: The small window builds the old bridge without warning!"}
+{"id":51,"text":"51: The small window builds the old bridge near the station?"}
+{"id":52,"text":"52: The small window explains the old bridge today."}
+{"id":53,"text":"53: The small window explains the old bridge at noon."}
+{"id":54,"text":"54: The small window explains the old bridge without warning!"}
+{"id":55,"text":"55: The small window explains the old bridge near the station?"}
+{"id":56,"text":"56: The small window finds the old bridge today."}
+{"id":57,"text":"57: The small window finds the old bridge at noon."}
+{"id":58,"text":"58: The small window finds the old bridge without warning!"}
+{"id":59,"text":"59: The small window finds the old bridge near the station?"}
+{"id":60,"text":"60: The small window protects the old bridge today."}
+{"id":61,"text":"61: The small window protects the old bridge at noon."}
+{"id":62,"text":"62: The small window protects the old bridge without warning!"}
+{"id":63,"text":"63: The small window protects the old bridge near the station?"}
+{"id":64,"text":"64: The small compiler crosses the old bridge today."}
+{"id":65,"text":"65: The small compiler crosses the old bridge at noon."}
+{"id":66,"text":"66: The small compiler crosses the old bridge without warning!"}
+{"id":67,"text":"67: The small compiler crosses the old bridge near the station?"}
+{"id":68,"text":"68: The small compiler opens the old bridge today."}
+{"id":69,"text":"69: The small compiler opens the old bridge at noon."}
+{"id":70,"text":"70: The small compiler opens the old bridge without warning!"}
+{"id":71,"text":"71: The small compiler opens the old bridge near the station?"}
+{"id":72,"text":"72: The small compiler tests the old bridge today."}
+{"id":73,"text":"73: The small compiler tests the old bridge at noon."}
+{"id":74,"text":"74: The small compiler tests the old bridge without warning!"}
+{"id":75,"text":"75: The small compiler tests the old bridge near the station?"}
+{"id":76,"text":"76: The small compiler observes the old bridge today."}
+{"id":77,"text":"77: The small compiler observes the old bridge at noon."}
+{"id":78,"text":"78: The small compiler observes the old bridge without warning!"}
+{"id":79,"text":"79: The small compiler observes the old bridge near the station?"}
+{"id":80,"text":"80: The small compiler builds the old bridge today."}
+{"id":81,"text":"81: The small compiler builds the old bridge at noon."}
+{"id":82,"text":"82: The small compiler builds the old bridge without warning!"}
+{"id":83,"text":"83: The small compiler builds the old bridge near the station?"}
+{"id":84,"text":"84: The small compiler explains the old bridge today."}
+{"id":85,"text":"85: The small compiler explains the old bridge at noon."}
+{"id":86,"text":"86: The small compiler explains the old bridge without warning!"}
+{"id":87,"text":"87: The small compiler explains the old bridge near the station?"}
+{"id":88,"text":"88: The small compiler finds the old bridge today."}
+{"id":89,"text":"89: The small compiler finds the old bridge at noon."}
+{"id":90,"text":"90: The small compiler finds the old bridge without warning!"}
+{"id":91,"text":"91: The small compiler finds the old bridge near the station?"}
+{"id":92,"text":"92: The small compiler protects the old bridge today."}
+{"id":93,"text":"93: The small compiler protects the old bridge at noon."}
+{"id":94,"text":"94: The small compiler protects the old bridge without warning!"}
+{"id":95,"text":"95: The small compiler protects the old bridge near the station?"}
+{"id":96,"text":"96: The small teacher crosses the old bridge today."}
+{"id":97,"text":"97: The small teacher crosses the old bridge at noon."}
+{"id":98,"text":"98: The small teacher crosses the old bridge without warning!"}
+{"id":99,"text":"99: The small teacher crosses the old bridge near the station?"}
+{"id":100,"text":"100: The small teacher opens the old bridge today."}
+{"id":101,"text":"101: The small teacher opens the old bridge at noon."}
+{"id":102,"text":"102: The small teacher opens the old bridge without warning!"}
+{"id":103,"text":"103: The small teacher opens the old bridge near the station?"}
+{"id":104,"text":"104: The small teacher tests the old bridge today."}
+{"id":105,"text":"105: The small teacher tests the old bridge at noon."}
+{"id":106,"text":"106: The small teacher tests the old bridge without warning!"}
+{"id":107,"text":"107: The small teacher tests the old bridge near the station?"}
+{"id":108,"text":"108: The small teacher observes the old bridge today."}
+{"id":109,"text":"109: The small teacher observes the old bridge at noon."}
+{"id":110,"text":"110: The small teacher observes the old bridge without warning!"}
+{"id":111,"text":"111: The small teacher observes the old bridge near the station?"}
+{"id":112,"text":"112: The small teacher builds the old bridge today."}
+{"id":113,"text":"113: The small teacher builds the old bridge at noon."}
+{"id":114,"text":"114: The small teacher builds the old bridge without warning!"}
+{"id":115,"text":"115: The small teacher builds the old bridge near the station?"}
+{"id":116,"text":"116: The small teacher explains the old bridge today."}
+{"id":117,"text":"117: The small teacher explains the old bridge at noon."}
+{"id":118,"text":"118: The small teacher explains the old bridge without warning!"}
+{"id":119,"text":"119: The small teacher explains the old bridge near the station?"}
+{"id":120,"text":"120: The small teacher finds the old bridge today."}
+{"id":121,"text":"121: The small teacher finds the old bridge at noon."}
+{"id":122,"text":"122: The small teacher finds the old bridge without warning!"}
+{"id":123,"text":"123: The small teacher finds the old bridge near the station?"}
+{"id":124,"text":"124: The small teacher protects the old bridge today."}
+{"id":125,"text":"125: The small teacher protects the old bridge at noon."}
+{"id":126,"text":"126: The small teacher protects the old bridge without warning!"}
+{"id":127,"text":"127: The small teacher protects the old bridge near the station?"}
+{"id":128,"text":"128: The small river crosses the old bridge today."}
+{"id":129,"text":"129: The small river crosses the old bridge at noon."}
+{"id":130,"text":"130: The small river crosses the old bridge without warning!"}
+{"id":131,"text":"131: The small river crosses the old bridge near the station?"}
+{"id":132,"text":"132: The small river opens the old bridge today."}
+{"id":133,"text":"133: The small river opens the old bridge at noon."}
+{"id":134,"text":"134: The small river opens the old bridge without warning!"}
+{"id":135,"text":"135: The small river opens the old bridge near the station?"}
+{"id":136,"text":"136: The small river tests the old bridge today."}
+{"id":137,"text":"137: The small river tests the old bridge at noon."}
+{"id":138,"text":"138: The small river tests the old bridge without warning!"}
+{"id":139,"text":"139: The small river tests the old bridge near the station?"}
+{"id":140,"text":"140: The small river observes the old bridge today."}
+{"id":141,"text":"141: The small river observes the old bridge at noon."}
+{"id":142,"text":"142: The small river observes the old bridge without warning!"}
+{"id":143,"text":"143: The small river observes the old bridge near the station?"}
+{"id":144,"text":"144: The small river builds the old bridge today."}
+{"id":145,"text":"145: The small river builds the old bridge at noon."}
+{"id":146,"text":"146: The small river builds the old bridge without warning!"}
+{"id":147,"text":"147: The small river builds the old bridge near the station?"}
+{"id":148,"text":"148: The small river explains the old bridge today."}
+{"id":149,"text":"149: The small river explains the old bridge at noon."}
+{"id":150,"text":"150: The small river explains the old bridge without warning!"}
+{"id":151,"text":"151: The small river explains the old bridge near the station?"}
+{"id":152,"text":"152: The small river finds the old bridge today."}
+{"id":153,"text":"153: The small river finds the old bridge at noon."}
+{"id":154,"text":"154: The small river finds the old bridge without warning!"}
+{"id":155,"text":"155: The small river finds the old bridge near the station?"}
+{"id":156,"text":"156: The small river protects the old bridge today."}
+{"id":157,"text":"157: The small river protects the old bridge at noon."}
+{"id":158,"text":"158: The small river protects the old bridge without warning!"}
+{"id":159,"text":"159: The small river protects the old bridge near the station?"}
+{"id":160,"text":"160: The small market crosses the old bridge today."}
+{"id":161,"text":"161: The small market crosses the old bridge at noon."}
+{"id":162,"text":"162: The small market crosses the old bridge without warning!"}
+{"id":163,"text":"163: The small market crosses the old bridge near the station?"}
+{"id":164,"text":"164: The small market opens the old bridge today."}
+{"id":165,"text":"165: The small market opens the old bridge at noon."}
+{"id":166,"text":"166: The small market opens the old bridge without warning!"}
+{"id":167,"text":"167: The small market opens the old bridge near the station?"}
+{"id":168,"text":"168: The small market tests the old bridge today."}
+{"id":169,"text":"169: The small market tests the old bridge at noon."}
+{"id":170,"text":"170: The small market tests the old bridge without warning!"}
+{"id":171,"text":"171: The small market tests the old bridge near the station?"}
+{"id":172,"text":"172: The small market observes the old bridge today."}
+{"id":173,"text":"173: The small market observes the old bridge at noon."}
+{"id":174,"text":"174: The small market observes the old bridge without warning!"}
+{"id":175,"text":"175: The small market observes the old bridge near the station?"}
+{"id":176,"text":"176: The small market builds the old bridge today."}
+{"id":177,"text":"177: The small market builds the old bridge at noon."}
+{"id":178,"text":"178: The small market builds the old bridge without warning!"}
+{"id":179,"text":"179: The small market builds the old bridge near the station?"}
+{"id":180,"text":"Hello, world!"}
+{"id":181,"text":"Numbers: 0, 1, 2, 3.14159, and 2026-07-15."}
+{"id":182,"text":"Quotes “like this”, apostrophes, em—dashes, and ellipses… should work."}
+{"id":183,"text":"Café naïve résumé coöperate — Unicode normalization matters."}
+{"id":184,"text":"Emoji test: 🚄🌧️🧪; please keep translating the surrounding English."}
+{"id":185,"text":"Line one\nLine two\tTabbed text."}
+{"id":186,"text":"UPPERCASE and lowercase MixedCase words."}
+{"id":187,"text":"A"}
+{"id":188,"text":"I do not know."}
+{"id":189,"text":"Where is platform number twelve?"}
+{"id":190,"text":"Rust prevents many memory errors, but careful design still matters."}
+{"id":191,"text":"If the weather changes tomorrow, please close every open window."}
+{"id":192,"text":"The quick brown fox jumps over the lazy dog."}
+{"id":193,"text":"Zero-width? abc​def and non-breaking space."}
+{"id":194,"text":"Repeated punctuation!!!???..."}
+{"id":195,"text":"The CPU batch must match each sentence translated alone."}
+{"id":196,"text":"A longer sentence with several clauses, commas, numbers 42 and 9000, plus a final question: does it still agree?"}
+{"id":197,"text":"Thank you for your help!"}
+{"id":198,"text":"Please open the window."}
+{"id":199,"text":"The weather is beautiful today."}

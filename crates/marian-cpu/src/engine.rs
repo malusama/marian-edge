@@ -1,5 +1,6 @@
 use std::{collections::HashMap, fs, path::Path};
 
+use memmap2::MmapOptions;
 use safetensors::{Dtype, SafeTensors, tensor::TensorView};
 
 use marian_model::{Architecture, LexicalShortlist};
@@ -499,8 +500,12 @@ impl ModelWeights {
                 metadata.len()
             ));
         }
-        let bytes = fs::read(path)
-            .map_err(|error| format!("failed to read weights {}: {error}", path.display()))?;
+        let file = fs::File::open(path)
+            .map_err(|error| format!("failed to open weights {}: {error}", path.display()))?;
+        // SAFETY: Read-only mapping; all tensors are copied into owned Matrix
+        // storage before this function returns and the mapping is dropped.
+        let bytes = unsafe { MmapOptions::new().map(&file) }
+            .map_err(|error| format!("failed to map weights {}: {error}", path.display()))?;
         let tensors = SafeTensors::deserialize(&bytes)
             .map_err(|error| format!("invalid safetensors {}: {error}", path.display()))?;
         let mut tensors = tensors.tensors().into_iter().collect::<HashMap<_, _>>();

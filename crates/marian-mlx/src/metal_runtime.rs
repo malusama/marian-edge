@@ -4,6 +4,7 @@ use std::{
     ptr::NonNull,
 };
 
+use half::f16;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
 use objc2_metal::{
@@ -20,10 +21,46 @@ unsafe extern "C" {}
 const KERNEL_SOURCE: &str = include_str!("../metal/kernels.metal");
 const BUFFER_OPTIONS: MTLResourceOptions = MTLResourceOptions::StorageModeShared;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MetalStorage {
+    Fp32,
+    MixedF16,
+}
+
+impl MetalStorage {
+    fn from_env() -> Result<Self, String> {
+        match std::env::var("MARIAN_MLX_METAL_PRECISION")
+            .unwrap_or_else(|_| "fp32".into())
+            .as_str()
+        {
+            "fp32" => Ok(Self::Fp32),
+            "mixed-f16" => Ok(Self::MixedF16),
+            value => Err(format!(
+                "unsupported MARIAN_MLX_METAL_PRECISION {value:?}; expected fp32 or mixed-f16"
+            )),
+        }
+    }
+
+    pub(crate) const fn code(self) -> u32 {
+        match self {
+            Self::Fp32 => 0,
+            Self::MixedF16 => 1,
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Fp32 => "fp32",
+            Self::MixedF16 => "mixed-f16",
+        }
+    }
+}
+
 mod private {
     pub trait Sealed {}
 
     impl Sealed for u8 {}
+    impl Sealed for u16 {}
     impl Sealed for u32 {}
     impl Sealed for i32 {}
     impl Sealed for f32 {}
@@ -100,7 +137,6 @@ pub(crate) struct Pipelines {
     pub(crate) matmul: PipelineState,
     pub(crate) embedding: PipelineState,
     pub(crate) decoder_input: PipelineState,
-    pub(crate) relu: PipelineState,
     pub(crate) residual_norm: PipelineState,
     pub(crate) ssru_norm: PipelineState,
     pub(crate) attention_scores: PipelineState,
@@ -115,10 +151,12 @@ pub(crate) struct MetalRuntime {
     queue: Queue,
     pub(crate) pipelines: Pipelines,
     device_name: String,
+    storage: MetalStorage,
 }
 
 impl MetalRuntime {
     pub(crate) fn new() -> Result<Self, String> {
+        let storage = MetalStorage::from_env()?;
         let device = MTLCreateSystemDefaultDevice()
             .ok_or_else(|| "Metal has no system default device".to_string())?;
         let queue = device
@@ -149,7 +187,6 @@ impl MetalRuntime {
             matmul: load("matmul_f32")?,
             embedding: load("embedding_positions_f32")?,
             decoder_input: load("decoder_input_f32")?,
-            relu: load("relu_f32")?,
             residual_norm: load("residual_layer_norm_f32")?,
             ssru_norm: load("ssru_update_layer_norm_f32")?,
             attention_scores: load("attention_scores_f32")?,
@@ -164,7 +201,12 @@ impl MetalRuntime {
             queue,
             pipelines,
             device_name,
+            storage,
         })
+    }
+
+    pub(crate) const fn storage(&self) -> MetalStorage {
+        self.storage
     }
 
     pub(crate) fn device_name(&self) -> &str {
@@ -195,6 +237,20 @@ impl MetalRuntime {
 
     pub(crate) fn upload_bytes(&self, values: &[u8]) -> Result<Buffer, String> {
         self.upload(values)
+    }
+
+    pub(crate) fn upload_model_f32(&self, values: &[u8]) -> Result<Buffer, String> {
+        if self.storage == MetalStorage::Fp32 {
+            return self.upload_bytes(values);
+        }
+        let chunks = values.chunks_exact(4);
+        if !chunks.remainder().is_empty() {
+            return Err("FP32 model tensor byte length is not divisible by four".into());
+        }
+        let converted = chunks
+            .map(|bytes| f16::from_f32(f32::from_le_bytes(bytes.try_into().unwrap())).to_bits())
+            .collect::<Vec<_>>();
+        self.upload(&converted)
     }
 
     fn allocate(&self, bytes: usize) -> Result<Buffer, String> {
@@ -341,6 +397,8 @@ mod tests {
         cols: u32,
         inner: u32,
         has_bias: u32,
+        activation: u32,
+        storage: u32,
     }
 
     #[repr(C)]
@@ -348,6 +406,7 @@ mod tests {
     struct NormParams {
         rows: u32,
         dim: u32,
+        storage: u32,
     }
 
     #[repr(C)]
@@ -366,6 +425,7 @@ mod tests {
         batch: u32,
         candidates: u32,
         dim: u32,
+        storage: u32,
     }
 
     // SAFETY: These repr(C) u32-only layouts mirror the same structures in
@@ -393,6 +453,8 @@ mod tests {
                 cols: 2,
                 inner: 3,
                 has_bias: 1,
+                activation: 0,
+                storage: 0,
             },
             grid(16, 16, 1),
             grid(16, 16, 1),
@@ -424,7 +486,11 @@ mod tests {
         commands.dispatch_threadgroups(
             &runtime.pipelines.residual_norm,
             &[&input, &residual, &scale, &bias, &normalized],
-            &NormParams { rows: 1, dim: 384 },
+            &NormParams {
+                rows: 1,
+                dim: 384,
+                storage: 0,
+            },
             grid(1, 1, 1),
             grid(128, 1, 1),
         );
@@ -448,6 +514,7 @@ mod tests {
                 batch: 2,
                 candidates: 5,
                 dim: 1,
+                storage: 0,
             },
             grid(2, 1, 1),
             grid(128, 1, 1),
