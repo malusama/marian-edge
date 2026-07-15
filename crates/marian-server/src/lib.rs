@@ -7,6 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use futures_util::future::join_all;
 use marian_core::{TranslateError, TranslationInput, Translator};
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -152,30 +153,56 @@ async fn immersive_translate(
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
 
-    // Child requests are submitted together so the scheduler can merge them
-    // into GPU batches; output order is preserved by the join handle order.
+    // Group equal source/length buckets before submission so alternating short
+    // and long page fragments do not fragment otherwise compatible GPU
+    // batches. Every task carries its original index for response-order
+    // restoration below.
+    let mut inputs = inputs.into_iter().enumerate().collect::<Vec<_>>();
+    inputs.sort_by(
+        |(_, (left_text, left_source)), (_, (right_text, right_source))| {
+            let bucket = |text: &str| {
+                text.chars()
+                    .count()
+                    .max(1)
+                    .checked_next_power_of_two()
+                    .unwrap_or(usize::MAX)
+            };
+            left_source
+                .cmp(right_source)
+                .then_with(|| bucket(left_text).cmp(&bucket(right_text)))
+        },
+    );
     let mut tasks = Vec::with_capacity(inputs.len());
-    for (text, source) in inputs {
+    for (index, (text, source)) in inputs {
         let translator = state.translator.clone();
         let target = target.clone();
-        tasks.push(tokio::spawn(async move {
+        tasks.push(async move {
             let output = translator
                 .translate(TranslationInput::new(text, &source, target))
                 .await;
-            output.map(|output| ImmersiveItem {
-                detected_source_lang: source,
-                text: output.text,
+            output.map(|output| {
+                (
+                    index,
+                    ImmersiveItem {
+                        detected_source_lang: source,
+                        text: output.text,
+                    },
+                )
             })
-        }));
+        });
     }
 
-    let mut translations = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        let item = task
-            .await
-            .map_err(|error| ApiError::internal(format!("translation task failed: {error}")))??;
-        translations.push(item);
+    let mut translations = std::iter::repeat_with(|| None)
+        .take(tasks.len())
+        .collect::<Vec<_>>();
+    for result in join_all(tasks).await {
+        let (index, item) = result?;
+        translations[index] = Some(item);
     }
+    let translations = translations
+        .into_iter()
+        .map(|item| item.expect("every immersive translation task returned an index"))
+        .collect();
     Ok(Json(ImmersiveResponse { translations }))
 }
 
@@ -311,14 +338,6 @@ impl ApiError {
     fn payload_too_large(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
-            message: message.into(),
-            retry_after: false,
-        }
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
             retry_after: false,
         }

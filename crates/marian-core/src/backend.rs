@@ -17,6 +17,13 @@ pub trait TranslationBackend: 'static {
         true
     }
 
+    /// Minimum number of identical rows to retain when the scheduler
+    /// coalesces duplicates inside one dynamic batch. Accelerators may prefer
+    /// a wider matrix even though every retained row produces the same result.
+    fn preferred_duplicate_batch_width(&self) -> usize {
+        1
+    }
+
     fn translate_batch(
         &mut self,
         inputs: &[TranslationInput],

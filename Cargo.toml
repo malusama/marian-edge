@@ -21,6 +21,7 @@ homepage = "https://github.com/malusama/marian-mlx"
 anyhow = "1.0.102"
 axum = "0.8.8"
 clap = { version = "4.5.60", features = ["derive", "env"] }
+futures-util = "0.3.32"
 half = "2.7.1"
 marian-core = { version = "0.4.0", path = "crates/marian-core" }
 marian-cpu = { version = "0.4.0", path = "crates/marian-cpu" }
@@ -49,6 +50,13 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLPipeline",
     "MTLResource",
     "MTLTypes",
+] }
+objc2-metal-performance-shaders = { version = "0.3.2", default-features = false, features = [
+    "MPSCore",
+    "MPSCoreTypes",
+    "MPSKernel",
+    "MPSMatrix",
+    "MPSMatrixMultiplication",
 ] }
 rten-gemm = "=0.21.0"
 rten-tensor = "=0.21.0"

@@ -24,6 +24,7 @@ cpu-fp32 = ["cpu"]
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 marian-core.workspace = true
 marian-cpu = { workspace = true, optional = true }
 marian-mlx.workspace = true

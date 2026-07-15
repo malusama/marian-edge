@@ -9,6 +9,8 @@ inline float model_value(device const uchar* values, uint index, uint storage) {
 }
 
 constant uint TILE = 16;
+constant uint MATMUL_TILE = 32;
+constant uint MATMUL_INNER_TILE = 16;
 constant uint REDUCTION_THREADS = 128;
 constant uint FLASH_ATTENTION_THREADS = 32;
 constant uint FLASH_ATTENTION_MAX_HEAD_DIM = 64;
@@ -58,6 +60,94 @@ kernel void matmul_f32(
     value += p.has_bias != 0 ? model_value(bias, col, p.storage) : 0.0f;
     output[row * p.cols + col] = p.activation != 0 ? max(value, 0.0f) : value;
   }
+}
+
+// A 32x32 output tile computed by one 256-thread group. Each thread owns four
+// rows in one column, which halves redundant LHS/RHS threadgroup loads versus
+// four independent 16x16 tiles while retaining the original increasing-K
+// accumulation order for every output value.
+kernel void matmul_microtile_f32(
+    device const float* lhs [[buffer(0)]],
+    device const uchar* rhs [[buffer(1)]],
+    device const uchar* bias [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant MatMulParams& p [[buffer(4)]],
+    ushort2 local [[thread_position_in_threadgroup]],
+    uint2 group [[threadgroup_position_in_grid]]) {
+  threadgroup float lhs_tile[MATMUL_TILE][MATMUL_INNER_TILE];
+  threadgroup float rhs_tile[MATMUL_INNER_TILE][MATMUL_TILE];
+  const uint linear = uint(local.y) * MATMUL_TILE + uint(local.x);
+  const uint row0 = group.y * MATMUL_TILE + uint(local.y);
+  const uint row1 = row0 + 8;
+  const uint row2 = row1 + 8;
+  const uint row3 = row2 + 8;
+  const uint col = group.x * MATMUL_TILE + uint(local.x);
+  float value0 = 0.0f;
+  float value1 = 0.0f;
+  float value2 = 0.0f;
+  float value3 = 0.0f;
+
+  for (uint start = 0; start < p.inner; start += MATMUL_INNER_TILE) {
+    for (uint index = linear; index < MATMUL_TILE * MATMUL_INNER_TILE; index += 256) {
+      const uint tile_row = index / MATMUL_INNER_TILE;
+      const uint tile_inner = index % MATMUL_INNER_TILE;
+      const uint row = group.y * MATMUL_TILE + tile_row;
+      const uint inner = start + tile_inner;
+      lhs_tile[tile_row][tile_inner] = row < p.rows && inner < p.inner
+          ? lhs[row * p.inner + inner] : 0.0f;
+    }
+    for (uint index = linear; index < MATMUL_INNER_TILE * MATMUL_TILE; index += 256) {
+      const uint tile_inner = index / MATMUL_TILE;
+      const uint tile_col = index % MATMUL_TILE;
+      const uint inner = start + tile_inner;
+      const uint column = group.x * MATMUL_TILE + tile_col;
+      rhs_tile[tile_inner][tile_col] = inner < p.inner && column < p.cols
+          ? model_value(rhs, inner * p.cols + column, p.storage) : 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint index = 0; index < MATMUL_INNER_TILE; ++index) {
+      const float weight = rhs_tile[index][local.x];
+      value0 += lhs_tile[local.y][index] * weight;
+      value1 += lhs_tile[local.y + 8][index] * weight;
+      value2 += lhs_tile[local.y + 16][index] * weight;
+      value3 += lhs_tile[local.y + 24][index] * weight;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  if (col < p.cols) {
+    const float offset = p.has_bias != 0 ? model_value(bias, col, p.storage) : 0.0f;
+    if (row0 < p.rows) {
+      value0 += offset;
+      output[row0 * p.cols + col] = p.activation != 0 ? max(value0, 0.0f) : value0;
+    }
+    if (row1 < p.rows) {
+      value1 += offset;
+      output[row1 * p.cols + col] = p.activation != 0 ? max(value1, 0.0f) : value1;
+    }
+    if (row2 < p.rows) {
+      value2 += offset;
+      output[row2 * p.cols + col] = p.activation != 0 ? max(value2, 0.0f) : value2;
+    }
+    if (row3 < p.rows) {
+      value3 += offset;
+      output[row3 * p.cols + col] = p.activation != 0 ? max(value3, 0.0f) : value3;
+    }
+  }
+}
+
+kernel void matmul_bias_activation_f32(
+    device float* values [[buffer(0)]],
+    device const uchar* bias [[buffer(1)]],
+    constant MatMulParams& p [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]]) {
+  const uint column = gid.x;
+  const uint row = gid.y;
+  if (row >= p.rows || column >= p.cols) return;
+  const uint index = row * p.cols + column;
+  float value = values[index];
+  if (p.has_bias != 0) value += model_value(bias, column, p.storage);
+  values[index] = p.activation != 0 ? max(value, 0.0f) : value;
 }
 
 struct EmbeddingParams {
@@ -538,4 +628,34 @@ kernel void argmax_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
   if (tid == 0) selected[batch] = indices[0];
+}
+
+struct AdvanceDecodeParams {
+  uint batch;
+  uint candidates;
+  uint step;
+  uint history_step;
+};
+
+kernel void advance_decode_f32(
+    device const uint* selected [[buffer(0)]],
+    device const uint* candidate_ids [[buffer(1)]],
+    device int* previous [[buffer(2)]],
+    device const uint* limits [[buffer(3)]],
+    device uint* finished [[buffer(4)]],
+    device int* history [[buffer(5)]],
+    constant AdvanceDecodeParams& p [[buffer(6)]],
+    uint row [[thread_position_in_grid]]) {
+  if (row >= p.batch) return;
+  const uint history_index = p.history_step * p.batch + row;
+  if (finished[row] != 0 || p.step >= limits[row]) {
+    if (p.step >= limits[row]) finished[row] = 1;
+    history[history_index] = -1;
+    return;
+  }
+  const uint candidate = selected[row];
+  const uint token = candidate_ids[row * p.candidates + candidate];
+  previous[row] = int(token);
+  history[history_index] = int(token);
+  if (token == 0) finished[row] = 1;
 }

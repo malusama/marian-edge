@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -456,8 +456,35 @@ fn worker_loop<B: TranslationBackend>(
         stats.in_flight.fetch_add(batch_size, Ordering::Relaxed);
         stats.largest_batch.fetch_max(batch_size, Ordering::Relaxed);
 
-        let inputs: Vec<_> = jobs.iter().map(|job| job.input.clone()).collect();
-        let result = backend.translate_batch(&inputs);
+        // Coalesce byte-for-byte identical requests within this dynamic batch.
+        // This is deliberately not a cross-batch cache: every backend call
+        // remains fresh, while repeated page fragments or concurrent retries
+        // avoid redundant tokenization and inference.
+        let duplicate_width = backend
+            .preferred_duplicate_batch_width()
+            .clamp(1, jobs.len());
+        let mut unique_inputs = Vec::with_capacity(jobs.len());
+        let mut unique_by_input = HashMap::with_capacity(jobs.len());
+        let mut output_indices = Vec::with_capacity(jobs.len());
+        for job in &jobs {
+            let index = if let Some((first_index, retained)) = unique_by_input.get_mut(&job.input) {
+                if *retained < duplicate_width {
+                    let index = unique_inputs.len();
+                    unique_inputs.push(job.input.clone());
+                    *retained += 1;
+                    index
+                } else {
+                    *first_index
+                }
+            } else {
+                let index = unique_inputs.len();
+                unique_inputs.push(job.input.clone());
+                unique_by_input.insert(job.input.clone(), (index, 1_usize));
+                index
+            };
+            output_indices.push(index);
+        }
+        let result = backend.translate_batch(&unique_inputs);
         let backend_ready = backend.is_ready();
         if !backend_ready {
             // Publish the failed state before replying or draining so new
@@ -465,8 +492,9 @@ fn worker_loop<B: TranslationBackend>(
             worker_stopped.store(true, Ordering::Release);
         }
         match result {
-            Ok(outputs) if outputs.len() == jobs.len() => {
-                for (job, output) in jobs.into_iter().zip(outputs) {
+            Ok(outputs) if outputs.len() == unique_inputs.len() => {
+                for (job, output_index) in jobs.into_iter().zip(output_indices) {
+                    let output = outputs[output_index].clone();
                     if job.reply.send(Ok(output)).is_ok() {
                         stats.completed.fetch_add(1, Ordering::Relaxed);
                     }
@@ -476,7 +504,7 @@ fn worker_loop<B: TranslationBackend>(
                 let error = BackendError::Inference(format!(
                     "backend returned {} outputs for {} inputs",
                     outputs.len(),
-                    jobs.len()
+                    unique_inputs.len()
                 ));
                 fail_jobs(jobs, error, stats);
             }
@@ -529,7 +557,7 @@ mod tests {
     use std::{
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
         time::Duration,
@@ -549,6 +577,40 @@ mod tests {
 
     struct SharedReadinessBackend {
         ready: Arc<AtomicBool>,
+    }
+
+    struct CountingBackend {
+        inferred_inputs: Arc<AtomicUsize>,
+    }
+
+    impl TranslationBackend for CountingBackend {
+        fn info(&self) -> BackendInfo {
+            BackendInfo {
+                name: "counting-test".into(),
+                device: "none".into(),
+                model: "test".into(),
+                precision: "n/a".into(),
+                attention: None,
+                supports_batching: true,
+            }
+        }
+
+        fn translate_batch(
+            &mut self,
+            inputs: &[TranslationInput],
+        ) -> Result<Vec<TranslationOutput>, BackendError> {
+            self.inferred_inputs
+                .fetch_add(inputs.len(), Ordering::Relaxed);
+            Ok(inputs
+                .iter()
+                .map(|input| TranslationOutput {
+                    text: input.text.clone(),
+                    score: None,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                })
+                .collect())
+        }
     }
 
     impl TranslationBackend for TerminalBackend {
@@ -675,6 +737,44 @@ mod tests {
         assert!(stats.largest_batch > 1);
         translator.shutdown().await;
         assert!(!translator.is_ready());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identical_requests_are_inferred_once_per_dynamic_batch() {
+        let inferred_inputs = Arc::new(AtomicUsize::new(0));
+        let backend_counter = Arc::clone(&inferred_inputs);
+        let translator = Arc::new(
+            Translator::start(
+                SchedulerConfig {
+                    max_batch_size: 8,
+                    batch_window: Duration::from_millis(50),
+                    ..SchedulerConfig::default()
+                },
+                move || {
+                    Ok(CountingBackend {
+                        inferred_inputs: backend_counter,
+                    })
+                },
+            )
+            .unwrap(),
+        );
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let translator = Arc::clone(&translator);
+            tasks.push(tokio::spawn(async move {
+                translator
+                    .translate(TranslationInput::new("same", "en", "zh"))
+                    .await
+                    .unwrap()
+            }));
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap().text, "same");
+        }
+        assert_eq!(translator.stats().snapshot().largest_batch, 8);
+        assert_eq!(inferred_inputs.load(Ordering::Relaxed), 1);
+        translator.shutdown().await;
     }
 
     #[test]

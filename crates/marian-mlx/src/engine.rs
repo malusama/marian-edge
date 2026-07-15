@@ -16,11 +16,14 @@ use crate::metal_runtime::{Buffer, Commands, MetalParams, MetalRuntime, MetalSto
 const MAXIMUM_POSITION: usize = 4_096;
 const MAXIMUM_BATCH: usize = 256;
 const MAXIMUM_SCORE_BYTES: usize = 1_024 * 1_024 * 1_024;
-const TILE: usize = 16;
+const MATMUL_TILE: usize = 32;
+const MATMUL_THREADS_Y: usize = 8;
 const FLASH_ATTENTION_THREADS: usize = 32;
 const FLASH_ATTENTION_MAX_HEAD_DIM: usize = 64;
 const FLASH_ATTENTION_QUERY_TILE: usize = 4;
 const DEFAULT_FLASH_ATTENTION_THRESHOLD: usize = 1;
+const MAXIMUM_DECODE_ROWS_PER_SUBMISSION: usize = 32;
+const MAXIMUM_DECODE_STEPS_PER_SUBMISSION: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AttentionMode {
@@ -145,6 +148,15 @@ struct OutputParams {
     storage: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AdvanceDecodeParams {
+    batch: u32,
+    candidates: u32,
+    step: u32,
+    history_step: u32,
+}
+
 // SAFETY: Every parameter is repr(C), contains only u32 fields, and mirrors
 // the structure with the same name in kernels.metal.
 unsafe impl MetalParams for MatMulParams {}
@@ -153,6 +165,7 @@ unsafe impl MetalParams for DecoderInputParams {}
 unsafe impl MetalParams for NormParams {}
 unsafe impl MetalParams for AttentionParams {}
 unsafe impl MetalParams for OutputParams {}
+unsafe impl MetalParams for AdvanceDecodeParams {}
 
 struct AttentionWeights {
     wq: Buffer,
@@ -216,8 +229,6 @@ struct EncodedBatch {
 }
 
 struct CandidateBatch {
-    ids: Vec<u32>,
-    count_values: Vec<usize>,
     width: usize,
     counts: Buffer,
     id_buffer: Buffer,
@@ -241,6 +252,8 @@ pub(crate) struct MetalEngine {
     source_vocab: usize,
     max_length_factor: usize,
     scratch: RefCell<MetalBufferArena>,
+    cross_scratch: RefCell<MetalBufferArena>,
+    upload_scratch: RefCell<MetalUploadArena>,
     scratch_active: Cell<bool>,
     storage: MetalStorage,
     attention: AttentionDispatch,
@@ -250,6 +263,35 @@ pub(crate) struct MetalEngine {
 struct MetalBufferArena {
     buffers: Vec<Buffer>,
     cursor: usize,
+}
+
+#[derive(Default)]
+struct MetalUploadArena {
+    buffers: Vec<Buffer>,
+    cursor: usize,
+}
+
+impl MetalUploadArena {
+    fn begin(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn take<T: crate::metal_runtime::MetalPod>(
+        &mut self,
+        runtime: &MetalRuntime,
+        values: &[T],
+    ) -> Result<Buffer, String> {
+        let required = checked_mul(values.len(), size_of::<T>())?;
+        let slot = self.cursor;
+        self.cursor += 1;
+        if slot == self.buffers.len() {
+            self.buffers.push(runtime.empty::<T>(values.len())?);
+        } else if self.buffers[slot].byte_len() < required {
+            self.buffers[slot] = runtime.empty::<T>(values.len())?;
+        }
+        self.buffers[slot].write(values)?;
+        Ok(self.buffers[slot].clone())
+    }
 }
 
 impl MetalBufferArena {
@@ -262,9 +304,9 @@ impl MetalBufferArena {
         let slot = self.cursor;
         self.cursor += 1;
         if slot == self.buffers.len() {
-            self.buffers.push(runtime.empty::<f32>(elements)?);
+            self.buffers.push(runtime.empty_cached::<f32>(elements)?);
         } else if self.buffers[slot].byte_len() < required {
-            self.buffers[slot] = runtime.empty::<f32>(elements)?;
+            self.buffers[slot] = runtime.empty_cached::<f32>(elements)?;
         }
         Ok(self.buffers[slot].clone())
     }
@@ -310,6 +352,8 @@ impl MetalEngine {
             source_vocab: architecture.source_vocab_size,
             max_length_factor: architecture.max_length_factor.max(1),
             scratch: RefCell::new(MetalBufferArena::default()),
+            cross_scratch: RefCell::new(MetalBufferArena::default()),
+            upload_scratch: RefCell::new(MetalUploadArena::default()),
             scratch_active: Cell::new(false),
             storage,
             attention,
@@ -343,18 +387,14 @@ impl MetalEngine {
         max_output_tokens: &[usize],
     ) -> Result<BatchOutput, String> {
         self.validate_batch(tokens, offsets, max_output_tokens)?;
+        self.upload_scratch.borrow_mut().begin();
         let batch = offsets.len() - 1;
         let encoded = self.encode(tokens, offsets)?;
         let candidates = self.prepare_candidates(tokens, offsets)?;
         let states = (0..self.model.decoder.len())
-            .map(|_| {
-                self.runtime
-                    .upload(&vec![0.0_f32; checked_mul(batch, self.dim)?])
-            })
+            .map(|_| self.upload_buffer(&vec![0.0_f32; checked_mul(batch, self.dim)?]))
             .collect::<Result<Vec<_>, String>>()?;
-        let mut previous = vec![-1_i32; batch];
-        let previous_buffer = self.runtime.upload(&previous)?;
-        let mut finished = vec![false; batch];
+        let previous_buffer = self.upload_buffer(&vec![-1_i32; batch])?;
         let mut generated = vec![Vec::<i32>::new(); batch];
         let limits = encoded
             .lengths
@@ -367,110 +407,135 @@ impl MetalEngine {
             })
             .collect::<Vec<_>>();
         let generation_limit = limits.iter().copied().max().unwrap_or(0);
+        let gpu_limits = limits
+            .iter()
+            .map(|&limit| to_u32(limit, "output token limit"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let limit_buffer = self.upload_buffer(&gpu_limits)?;
+        let finished_buffer = self.upload_buffer(&vec![0_u32; batch])?;
+        let mut step = 0;
 
-        for step in 0..generation_limit {
-            for row in 0..batch {
-                if !finished[row] && step >= limits[row] {
-                    finished[row] = true;
-                }
-            }
-            if finished.iter().all(|value| *value) {
-                break;
-            }
-            previous_buffer.write(&previous)?;
+        while step < generation_limit {
+            let steps_in_submission = (MAXIMUM_DECODE_ROWS_PER_SUBMISSION / batch)
+                .clamp(1, MAXIMUM_DECODE_STEPS_PER_SUBMISSION)
+                .min(generation_limit - step);
+            let history_buffer =
+                self.upload_buffer(&vec![-1_i32; checked_mul(steps_in_submission, batch)?])?;
             let _scratch = self.begin_scratch()?;
             let commands = self.commands()?;
-            let mut decoder = self.decoder_input(&commands, &previous_buffer, batch, step)?;
+            for history_step in 0..steps_in_submission {
+                let absolute_step = step + history_step;
+                let mut decoder =
+                    self.decoder_input(&commands, &previous_buffer, batch, absolute_step)?;
 
-            for (index, layer) in self.model.decoder.iter().enumerate() {
-                let update = self.matmul(
-                    &commands,
-                    &decoder,
-                    &layer.ssru.w,
-                    None,
-                    batch,
-                    self.dim,
-                    self.dim,
-                )?;
-                let forget = self.matmul(
-                    &commands,
-                    &decoder,
-                    &layer.ssru.wf,
-                    Some(&layer.ssru.bf),
-                    batch,
-                    self.dim,
-                    self.dim,
-                )?;
-                decoder = self.ssru_norm(
-                    &commands,
-                    &update,
-                    &forget,
-                    &states[index],
-                    &decoder,
-                    &layer.ssru.norm_scale,
-                    &layer.ssru.norm_bias,
-                    batch,
-                )?;
+                for (index, layer) in self.model.decoder.iter().enumerate() {
+                    let update = self.matmul(
+                        &commands,
+                        &decoder,
+                        &layer.ssru.w,
+                        None,
+                        batch,
+                        self.dim,
+                        self.dim,
+                    )?;
+                    let forget = self.matmul(
+                        &commands,
+                        &decoder,
+                        &layer.ssru.wf,
+                        Some(&layer.ssru.bf),
+                        batch,
+                        self.dim,
+                        self.dim,
+                    )?;
+                    decoder = self.ssru_norm(
+                        &commands,
+                        &update,
+                        &forget,
+                        &states[index],
+                        &decoder,
+                        &layer.ssru.norm_scale,
+                        &layer.ssru.norm_bias,
+                        batch,
+                    )?;
 
-                let query = self.matmul(
-                    &commands,
-                    &decoder,
-                    &layer.context.wq,
-                    Some(&layer.context.bq),
-                    batch,
-                    self.dim,
-                    self.dim,
-                )?;
-                let attended = self.attend(
-                    &commands,
-                    &query,
-                    &encoded.cross[index].key,
-                    &encoded.cross[index].value,
-                    &encoded.length_buffer,
-                    batch,
-                    1,
-                    encoded.source_length,
-                )?;
-                let context = self.matmul(
-                    &commands,
-                    &attended,
-                    &layer.context.wo,
-                    Some(&layer.context.bo),
-                    batch,
-                    self.dim,
-                    self.dim,
-                )?;
-                decoder = self.residual_norm(
-                    &commands,
-                    &context,
-                    &decoder,
-                    &layer.context.norm_scale,
-                    &layer.context.norm_bias,
-                    batch,
-                )?;
-                decoder = self.feed_forward(&commands, &decoder, &layer.ffn, batch)?;
+                    let query = self.matmul(
+                        &commands,
+                        &decoder,
+                        &layer.context.wq,
+                        Some(&layer.context.bq),
+                        batch,
+                        self.dim,
+                        self.dim,
+                    )?;
+                    let attended = self.attend(
+                        &commands,
+                        &query,
+                        &encoded.cross[index].key,
+                        &encoded.cross[index].value,
+                        &encoded.length_buffer,
+                        batch,
+                        1,
+                        encoded.source_length,
+                    )?;
+                    let context = self.matmul(
+                        &commands,
+                        &attended,
+                        &layer.context.wo,
+                        Some(&layer.context.bo),
+                        batch,
+                        self.dim,
+                        self.dim,
+                    )?;
+                    decoder = self.residual_norm(
+                        &commands,
+                        &context,
+                        &decoder,
+                        &layer.context.norm_scale,
+                        &layer.context.norm_bias,
+                        batch,
+                    )?;
+                    decoder = self.feed_forward(&commands, &decoder, &layer.ffn, batch)?;
+                }
+
+                let selected = self.select_tokens(&commands, &decoder, &candidates, batch)?;
+                let params = AdvanceDecodeParams {
+                    batch: to_u32(batch, "decode batch")?,
+                    candidates: to_u32(candidates.width, "candidate width")?,
+                    step: to_u32(absolute_step, "decode step")?,
+                    history_step: to_u32(history_step, "decode history step")?,
+                };
+                commands.dispatch(
+                    &commands.runtime().pipelines.advance_decode,
+                    &[
+                        &selected,
+                        &candidates.id_buffer,
+                        &previous_buffer,
+                        &limit_buffer,
+                        &finished_buffer,
+                        &history_buffer,
+                    ],
+                    &params,
+                    grid(batch, 1, 1),
+                    grid(64, 1, 1),
+                );
             }
-
-            let selected = self.select_tokens(&commands, &decoder, &candidates, batch)?;
             self.finish_commands(commands)?;
-            let selected = selected.read::<u32>(batch)?;
-            for row in 0..batch {
-                if finished[row] {
-                    continue;
+            let history = history_buffer.read::<i32>(checked_mul(steps_in_submission, batch)?)?;
+            for history_step in 0..steps_in_submission {
+                for row in 0..batch {
+                    let token = history[history_step * batch + row];
+                    if token >= 0 {
+                        generated[row].push(token);
+                    }
                 }
-                let candidate = selected[row] as usize;
-                let count = candidates.count_for_row(row)?;
-                if candidate >= count {
-                    return Err(format!(
-                        "Metal decoder selected candidate {candidate}, but row {row} has {count}"
-                    ));
-                }
-                let token = candidates.ids[row * candidates.width + candidate] as i32;
-                previous[row] = token;
-                generated[row].push(token);
-                if token == 0 {
-                    finished[row] = true;
-                }
+            }
+            step += steps_in_submission;
+            if finished_buffer
+                .read::<u32>(batch)?
+                .iter()
+                .all(|&value| value != 0)
+            {
+                break;
             }
         }
 
@@ -549,8 +614,41 @@ impl MetalEngine {
             .iter()
             .map(|&length| to_u32(length, "source length"))
             .collect::<Result<Vec<_>, _>>()?;
-        let token_buffer = self.runtime.upload(&padded)?;
-        let length_buffer = self.runtime.upload(&gpu_lengths)?;
+        let token_buffer = self.upload_buffer(&padded)?;
+        let length_buffer = self.upload_buffer(&gpu_lengths)?;
+
+        // Flash attention does not retain the classic path's quadratic score
+        // buffers, so the complete encoder and cross-cache projection can be
+        // submitted in one command buffer. This removes seven CPU/GPU waits
+        // from every request batch while preserving the layer order recorded
+        // in the compute encoder.
+        if self
+            .attention
+            .use_flash(source_length, source_length, self.dim / self.heads)
+        {
+            let _scratch = self.begin_scratch()?;
+            let commands = self.commands()?;
+            let mut encoder = self.embedding(&commands, &token_buffer, batch, source_length)?;
+            for layer in &self.model.encoder {
+                encoder = self.encode_layer(
+                    &commands,
+                    &encoder,
+                    layer,
+                    &length_buffer,
+                    batch,
+                    source_length,
+                )?;
+            }
+            let cross = self.build_cross_cache(&commands, &encoder, batch, source_length)?;
+            self.finish_commands(commands)?;
+            return Ok(EncodedBatch {
+                source_length,
+                lengths,
+                length_buffer,
+                cross,
+            });
+        }
+
         let commands = self.commands()?;
         let mut encoder = self.embedding(&commands, &token_buffer, batch, source_length)?;
         self.finish_commands(commands)?;
@@ -561,87 +659,19 @@ impl MetalEngine {
             // allocation alive; one command buffer for all six layers would
             // otherwise multiply the O(sequence^2) scratch requirement.
             let commands = self.commands()?;
-            let query = self.matmul(
+            encoder = self.encode_layer(
                 &commands,
                 &encoder,
-                &layer.attention.wq,
-                Some(&layer.attention.bq),
-                batch * source_length,
-                self.dim,
-                self.dim,
-            )?;
-            let key = self.matmul(
-                &commands,
-                &encoder,
-                &layer.attention.wk,
-                Some(&layer.attention.bk),
-                batch * source_length,
-                self.dim,
-                self.dim,
-            )?;
-            let value = self.matmul(
-                &commands,
-                &encoder,
-                &layer.attention.wv,
-                Some(&layer.attention.bv),
-                batch * source_length,
-                self.dim,
-                self.dim,
-            )?;
-            let attended = self.attend(
-                &commands,
-                &query,
-                &key,
-                &value,
+                layer,
                 &length_buffer,
                 batch,
                 source_length,
-                source_length,
             )?;
-            let projected = self.matmul(
-                &commands,
-                &attended,
-                &layer.attention.wo,
-                Some(&layer.attention.bo),
-                batch * source_length,
-                self.dim,
-                self.dim,
-            )?;
-            encoder = self.residual_norm(
-                &commands,
-                &projected,
-                &encoder,
-                &layer.attention.norm_scale,
-                &layer.attention.norm_bias,
-                batch * source_length,
-            )?;
-            encoder = self.feed_forward(&commands, &encoder, &layer.ffn, batch * source_length)?;
             self.finish_commands(commands)?;
         }
 
         let commands = self.commands()?;
-        let mut cross = Vec::with_capacity(self.model.decoder.len());
-        for layer in &self.model.decoder {
-            let key = self.matmul(
-                &commands,
-                &encoder,
-                &layer.context.wk,
-                Some(&layer.context.bk),
-                batch * source_length,
-                self.dim,
-                self.dim,
-            )?;
-            let value = self.matmul(
-                &commands,
-                &encoder,
-                &layer.context.wv,
-                Some(&layer.context.bv),
-                batch * source_length,
-                self.dim,
-                self.dim,
-            )?;
-            cross.push(CrossCache { key, value });
-        }
+        let cross = self.build_cross_cache(&commands, &encoder, batch, source_length)?;
         self.finish_commands(commands)?;
         Ok(EncodedBatch {
             source_length,
@@ -649,6 +679,107 @@ impl MetalEngine {
             length_buffer,
             cross,
         })
+    }
+
+    fn encode_layer(
+        &self,
+        commands: &Commands<'_>,
+        encoder: &Buffer,
+        layer: &EncoderLayer,
+        lengths: &Buffer,
+        batch: usize,
+        source_length: usize,
+    ) -> Result<Buffer, String> {
+        let rows = checked_mul(batch, source_length)?;
+        let query = self.matmul(
+            commands,
+            encoder,
+            &layer.attention.wq,
+            Some(&layer.attention.bq),
+            rows,
+            self.dim,
+            self.dim,
+        )?;
+        let key = self.matmul(
+            commands,
+            encoder,
+            &layer.attention.wk,
+            Some(&layer.attention.bk),
+            rows,
+            self.dim,
+            self.dim,
+        )?;
+        let value = self.matmul(
+            commands,
+            encoder,
+            &layer.attention.wv,
+            Some(&layer.attention.bv),
+            rows,
+            self.dim,
+            self.dim,
+        )?;
+        let attended = self.attend(
+            commands,
+            &query,
+            &key,
+            &value,
+            lengths,
+            batch,
+            source_length,
+            source_length,
+        )?;
+        let projected = self.matmul(
+            commands,
+            &attended,
+            &layer.attention.wo,
+            Some(&layer.attention.bo),
+            rows,
+            self.dim,
+            self.dim,
+        )?;
+        let normalized = self.residual_norm(
+            commands,
+            &projected,
+            encoder,
+            &layer.attention.norm_scale,
+            &layer.attention.norm_bias,
+            rows,
+        )?;
+        self.feed_forward(commands, &normalized, &layer.ffn, rows)
+    }
+
+    fn build_cross_cache(
+        &self,
+        commands: &Commands<'_>,
+        encoder: &Buffer,
+        batch: usize,
+        source_length: usize,
+    ) -> Result<Vec<CrossCache>, String> {
+        self.cross_scratch.borrow_mut().begin();
+        let rows = checked_mul(batch, source_length)?;
+        let mut cross = Vec::with_capacity(self.model.decoder.len());
+        for layer in &self.model.decoder {
+            let key = self.matmul_persistent(
+                commands,
+                encoder,
+                &layer.context.wk,
+                Some(&layer.context.bk),
+                rows,
+                self.dim,
+                self.dim,
+            )?;
+            let value = self.matmul_persistent(
+                commands,
+                encoder,
+                &layer.context.wv,
+                Some(&layer.context.bv),
+                rows,
+                self.dim,
+                self.dim,
+            )?;
+            cross.push(CrossCache { key, value });
+        }
+        Ok(cross)
     }
 
     fn finish_commands(&self, commands: Commands<'_>) -> Result<(), String> {
@@ -698,20 +829,17 @@ impl MetalEngine {
         if width == 0 {
             return Err("lexical shortlist produced an empty batch".into());
         }
-        let count_values = rows.iter().map(Vec::len).collect::<Vec<_>>();
-        let counts = count_values
+        let counts = rows
             .iter()
-            .map(|&count| to_u32(count, "candidate count"))
+            .map(|row| to_u32(row.len(), "candidate count"))
             .collect::<Result<Vec<_>, _>>()?;
         let mut ids = vec![0_u32; checked_mul(rows.len(), width)?];
         for (row_index, row) in rows.iter().enumerate() {
             ids[row_index * width..row_index * width + row.len()].copy_from_slice(row);
         }
         Ok(CandidateBatch {
-            id_buffer: self.runtime.upload(&ids)?,
-            counts: self.runtime.upload(&counts)?,
-            ids,
-            count_values,
+            id_buffer: self.upload_buffer(&ids)?,
+            counts: self.upload_buffer(&counts)?,
             width,
         })
     }
@@ -785,7 +913,21 @@ impl MetalEngine {
         cols: usize,
         inner: usize,
     ) -> Result<Buffer, String> {
-        self.matmul_with_activation(commands, lhs, rhs, bias, rows, cols, inner, false)
+        self.matmul_with_activation(commands, lhs, rhs, bias, rows, cols, inner, false, false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_persistent(
+        &self,
+        commands: &Commands<'_>,
+        lhs: &Buffer,
+        rhs: &Buffer,
+        bias: Option<&Buffer>,
+        rows: usize,
+        cols: usize,
+        inner: usize,
+    ) -> Result<Buffer, String> {
+        self.matmul_with_activation(commands, lhs, rhs, bias, rows, cols, inner, false, true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -799,13 +941,21 @@ impl MetalEngine {
         cols: usize,
         inner: usize,
         relu: bool,
+        persistent: bool,
     ) -> Result<Buffer, String> {
         require_f32(lhs, checked_mul(rows, inner)?, "matrix lhs")?;
         require_model(rhs, checked_mul(inner, cols)?, self.storage, "matrix rhs")?;
         if let Some(bias) = bias {
             require_model(bias, cols, self.storage, "matrix bias")?;
         }
-        let output = self.f32_buffer(checked_mul(rows, cols)?)?;
+        let elements = checked_mul(rows, cols)?;
+        let output = if persistent {
+            self.cross_scratch
+                .borrow_mut()
+                .take(&self.runtime, elements)?
+        } else {
+            self.f32_buffer(elements)?
+        };
         let params = MatMulParams {
             rows: to_u32(rows, "matrix rows")?,
             cols: to_u32(cols, "matrix columns")?,
@@ -814,13 +964,24 @@ impl MetalEngine {
             activation: u32::from(relu),
             storage: self.storage.code(),
         };
-        commands.dispatch(
-            &commands.runtime().pipelines.matmul,
-            &[lhs, rhs, bias.unwrap_or(&self.dummy_bias), &output],
-            &params,
-            grid(round_up(cols, TILE)?, round_up(rows, TILE)?, 1),
-            grid(TILE, TILE, 1),
-        );
+        if self.storage == MetalStorage::Fp32 {
+            commands.mps_matmul(lhs, rhs, &output, rows, cols, inner)?;
+            commands.dispatch(
+                &commands.runtime().pipelines.matmul_bias_activation,
+                &[&output, bias.unwrap_or(&self.dummy_bias)],
+                &params,
+                grid(cols, rows, 1),
+                grid(32, 8, 1),
+            );
+        } else {
+            commands.dispatch_threadgroups(
+                &commands.runtime().pipelines.matmul_microtile,
+                &[lhs, rhs, bias.unwrap_or(&self.dummy_bias), &output],
+                &params,
+                grid(cols.div_ceil(MATMUL_TILE), rows.div_ceil(MATMUL_TILE), 1),
+                grid(MATMUL_TILE, MATMUL_THREADS_Y, 1),
+            );
+        }
         Ok(output)
     }
 
@@ -985,6 +1146,7 @@ impl MetalEngine {
             self.ffn_dim,
             self.dim,
             true,
+            false,
         )?;
         let output = self.matmul(
             commands,
@@ -1051,14 +1213,12 @@ impl MetalEngine {
             self.runtime.empty::<f32>(elements)
         }
     }
-}
 
-impl CandidateBatch {
-    fn count_for_row(&self, row: usize) -> Result<usize, String> {
-        self.count_values
-            .get(row)
-            .copied()
-            .ok_or_else(|| format!("candidate row {row} is out of range"))
+    fn upload_buffer<T: crate::metal_runtime::MetalPod>(
+        &self,
+        values: &[T],
+    ) -> Result<Buffer, String> {
+        self.upload_scratch.borrow_mut().take(&self.runtime, values)
     }
 }
 
@@ -1313,13 +1473,6 @@ fn checked_mul(lhs: usize, rhs: usize) -> Result<usize, String> {
     lhs.checked_mul(rhs)
         .filter(|value| *value > 0)
         .ok_or_else(|| format!("Metal tensor shape {lhs} x {rhs} is zero or overflows"))
-}
-
-fn round_up(value: usize, multiple: usize) -> Result<usize, String> {
-    value
-        .checked_add(multiple - 1)
-        .map(|rounded| rounded / multiple * multiple)
-        .ok_or_else(|| "Metal dispatch dimension overflows".to_string())
 }
 
 fn to_u32(value: usize, label: &str) -> Result<u32, String> {

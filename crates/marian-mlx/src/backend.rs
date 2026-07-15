@@ -30,6 +30,7 @@ pub struct MetalBackend {
     precision: String,
     eos_id: i32,
     device: String,
+    duplicate_batch_width: usize,
 }
 
 impl MetalBackend {
@@ -80,6 +81,22 @@ impl MetalBackend {
             .map_err(|error| BackendError::Inference(format!("Metal warmup failed: {error}")))?;
         let device = engine.device_name().to_owned();
         let precision = engine.precision().to_owned();
+        let duplicate_batch_width = std::env::var("MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH")
+            .ok()
+            .map(|value| {
+                value.parse::<usize>().map_err(|_| {
+                    BackendError::Model(format!(
+                        "MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH {value:?} is not an integer"
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or(9);
+        if duplicate_batch_width == 0 {
+            return Err(BackendError::Model(
+                "MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH must be at least 1".into(),
+            ));
+        }
 
         Ok(Self {
             engine,
@@ -91,6 +108,7 @@ impl MetalBackend {
             precision,
             eos_id: manifest.architecture.eos_id,
             device,
+            duplicate_batch_width,
         })
     }
 }
@@ -109,6 +127,13 @@ impl TranslationBackend for MetalBackend {
 
     fn is_ready(&self) -> bool {
         self.engine.is_ready()
+    }
+
+    fn preferred_duplicate_batch_width(&self) -> usize {
+        // MPS GEMM on the qualified M1 has a steep small-row efficiency cliff.
+        // Keep this tunable so deployments can qualify the occupancy knee for
+        // their GPU without changing the public scheduler configuration.
+        self.duplicate_batch_width
     }
 
     fn translate_batch(

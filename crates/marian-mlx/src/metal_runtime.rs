@@ -1,16 +1,21 @@
 use std::{
+    cell::RefCell,
+    collections::HashMap,
     ffi::c_void,
     mem::{size_of, size_of_val},
     ptr::NonNull,
 };
 
 use half::f16;
-use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
     MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
     MTLLanguageVersion, MTLLibrary, MTLResourceOptions, MTLSize,
+};
+use objc2_metal_performance_shaders::{
+    MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication,
 };
 
 // objc2-metal deliberately leaves this transitive framework link to the
@@ -85,11 +90,14 @@ type Device = Retained<ProtocolObject<dyn MTLDevice>>;
 type Queue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
 type RawBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 type PipelineState = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
+type MpsMatrixKey = (usize, usize, usize);
+type CachedMpsMatrix = (Retained<MPSMatrix>, RawBuffer);
 
 #[derive(Clone)]
 pub(crate) struct Buffer {
     raw: RawBuffer,
     bytes: usize,
+    cacheable: bool,
 }
 
 impl Buffer {
@@ -120,8 +128,8 @@ impl Buffer {
                 self.bytes
             ));
         }
-        // SAFETY: StorageModeShared gives the CPU a valid mapping, the source
-        // and destination are non-overlapping, and the checked range fits.
+        // SAFETY: StorageModeShared maps this checked byte range for the CPU;
+        // the scheduler serializes requests on the owning backend thread.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 values.as_ptr().cast::<u8>(),
@@ -134,7 +142,8 @@ impl Buffer {
 }
 
 pub(crate) struct Pipelines {
-    pub(crate) matmul: PipelineState,
+    pub(crate) matmul_microtile: PipelineState,
+    pub(crate) matmul_bias_activation: PipelineState,
     pub(crate) embedding: PipelineState,
     pub(crate) decoder_input: PipelineState,
     pub(crate) residual_norm: PipelineState,
@@ -145,6 +154,7 @@ pub(crate) struct Pipelines {
     pub(crate) attention_flash: PipelineState,
     pub(crate) output_logits: PipelineState,
     pub(crate) argmax: PipelineState,
+    pub(crate) advance_decode: PipelineState,
 }
 
 pub(crate) struct MetalRuntime {
@@ -153,6 +163,9 @@ pub(crate) struct MetalRuntime {
     pub(crate) pipelines: Pipelines,
     device_name: String,
     storage: MetalStorage,
+    mps_descriptors: RefCell<HashMap<(usize, usize), Retained<MPSMatrixDescriptor>>>,
+    mps_matmuls: RefCell<HashMap<(usize, usize, usize), Retained<MPSMatrixMultiplication>>>,
+    mps_matrices: RefCell<HashMap<MpsMatrixKey, CachedMpsMatrix>>,
 }
 
 impl MetalRuntime {
@@ -185,7 +198,8 @@ impl MetalRuntime {
                 .map_err(|error| format!("Metal pipeline {name} failed: {error:?}"))
         };
         let pipelines = Pipelines {
-            matmul: load("matmul_f32")?,
+            matmul_microtile: load("matmul_microtile_f32")?,
+            matmul_bias_activation: load("matmul_bias_activation_f32")?,
             embedding: load("embedding_positions_f32")?,
             decoder_input: load("decoder_input_f32")?,
             residual_norm: load("residual_layer_norm_f32")?,
@@ -196,6 +210,7 @@ impl MetalRuntime {
             attention_flash: load("attention_flash_f32")?,
             output_logits: load("output_logits_f32")?,
             argmax: load("argmax_f32")?,
+            advance_decode: load("advance_decode_f32")?,
         };
         let device_name = device.name().to_string();
         Ok(Self {
@@ -204,7 +219,90 @@ impl MetalRuntime {
             pipelines,
             device_name,
             storage,
+            mps_descriptors: RefCell::new(HashMap::new()),
+            mps_matmuls: RefCell::new(HashMap::new()),
+            mps_matrices: RefCell::new(HashMap::new()),
         })
+    }
+
+    fn mps_descriptor(
+        &self,
+        rows: usize,
+        columns: usize,
+    ) -> Result<Retained<MPSMatrixDescriptor>, String> {
+        if let Some(descriptor) = self.mps_descriptors.borrow().get(&(rows, columns)) {
+            return Ok(descriptor.clone());
+        }
+        let row_bytes = checked_bytes::<f32>(columns)?;
+        // SAFETY: The descriptor describes a packed row-major FP32 matrix.
+        let descriptor = unsafe {
+            MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
+                rows,
+                columns,
+                row_bytes,
+                MPSDataType::Float32,
+            )
+        };
+        self.mps_descriptors
+            .borrow_mut()
+            .insert((rows, columns), descriptor.clone());
+        Ok(descriptor)
+    }
+
+    fn mps_matmul_kernel(
+        &self,
+        rows: usize,
+        columns: usize,
+        inner: usize,
+    ) -> Retained<MPSMatrixMultiplication> {
+        if let Some(kernel) = self.mps_matmuls.borrow().get(&(rows, columns, inner)) {
+            return kernel.clone();
+        }
+        // SAFETY: The dimensions are validated against the buffers by the
+        // engine before the cached shape-specific kernel is requested.
+        let kernel = unsafe {
+            MPSMatrixMultiplication::initWithDevice_resultRows_resultColumns_interiorColumns(
+                MPSMatrixMultiplication::alloc(),
+                &self.device,
+                rows,
+                columns,
+                inner,
+            )
+        };
+        self.mps_matmuls
+            .borrow_mut()
+            .insert((rows, columns, inner), kernel.clone());
+        kernel
+    }
+
+    fn mps_matrix(
+        &self,
+        buffer: &Buffer,
+        rows: usize,
+        columns: usize,
+    ) -> Result<Retained<MPSMatrix>, String> {
+        let descriptor = self.mps_descriptor(rows, columns)?;
+        if !buffer.cacheable {
+            // SAFETY: The descriptor matches a packed FP32 buffer whose size
+            // was checked by the engine.
+            return Ok(unsafe {
+                MPSMatrix::initWithBuffer_descriptor(MPSMatrix::alloc(), &buffer.raw, &descriptor)
+            });
+        }
+        let identity = Retained::as_ptr(&buffer.raw) as *const () as usize;
+        let key = (identity, rows, columns);
+        if let Some((matrix, _buffer)) = self.mps_matrices.borrow().get(&key) {
+            return Ok(matrix.clone());
+        }
+        // SAFETY: Cacheable buffers are model weights or arena allocations;
+        // the retained raw buffer stored beside the view keeps them alive.
+        let matrix = unsafe {
+            MPSMatrix::initWithBuffer_descriptor(MPSMatrix::alloc(), &buffer.raw, &descriptor)
+        };
+        self.mps_matrices
+            .borrow_mut()
+            .insert(key, (matrix.clone(), buffer.raw.clone()));
+        Ok(matrix)
     }
 
     pub(crate) const fn storage(&self) -> MetalStorage {
@@ -217,7 +315,12 @@ impl MetalRuntime {
 
     pub(crate) fn empty<T: MetalPod>(&self, count: usize) -> Result<Buffer, String> {
         let bytes = checked_bytes::<T>(count)?;
-        self.allocate(bytes)
+        self.allocate(bytes, false)
+    }
+
+    pub(crate) fn empty_cached<T: MetalPod>(&self, count: usize) -> Result<Buffer, String> {
+        let bytes = checked_bytes::<T>(count)?;
+        self.allocate(bytes, true)
     }
 
     pub(crate) fn upload<T: MetalPod>(&self, values: &[T]) -> Result<Buffer, String> {
@@ -234,7 +337,11 @@ impl MetalRuntime {
                 .newBufferWithBytes_length_options(pointer, bytes, BUFFER_OPTIONS)
         }
         .ok_or_else(|| format!("Metal failed to allocate and upload {bytes} bytes"))?;
-        Ok(Buffer { raw, bytes })
+        Ok(Buffer {
+            raw,
+            bytes,
+            cacheable: false,
+        })
     }
 
     pub(crate) fn upload_bytes(&self, values: &[u8]) -> Result<Buffer, String> {
@@ -243,7 +350,9 @@ impl MetalRuntime {
 
     pub(crate) fn upload_model_f32(&self, values: &[u8]) -> Result<Buffer, String> {
         if self.storage == MetalStorage::Fp32 {
-            return self.upload_bytes(values);
+            let mut buffer = self.upload_bytes(values)?;
+            buffer.cacheable = true;
+            return Ok(buffer);
         }
         let chunks = values.chunks_exact(4);
         if !chunks.remainder().is_empty() {
@@ -252,10 +361,12 @@ impl MetalRuntime {
         let converted = chunks
             .map(|bytes| f16::from_f32(f32::from_le_bytes(bytes.try_into().unwrap())).to_bits())
             .collect::<Vec<_>>();
-        self.upload(&converted)
+        let mut buffer = self.upload(&converted)?;
+        buffer.cacheable = true;
+        Ok(buffer)
     }
 
-    fn allocate(&self, bytes: usize) -> Result<Buffer, String> {
+    fn allocate(&self, bytes: usize, cacheable: bool) -> Result<Buffer, String> {
         if bytes == 0 {
             return Err("cannot allocate an empty Metal buffer".into());
         }
@@ -263,7 +374,11 @@ impl MetalRuntime {
             .device
             .newBufferWithLength_options(bytes, BUFFER_OPTIONS)
             .ok_or_else(|| format!("Metal failed to allocate {bytes} bytes"))?;
-        Ok(Buffer { raw, bytes })
+        Ok(Buffer {
+            raw,
+            bytes,
+            cacheable,
+        })
     }
 
     pub(crate) fn commands(&self) -> Result<Commands<'_>, String> {
@@ -276,7 +391,7 @@ impl MetalRuntime {
             .ok_or_else(|| "Metal failed to create a compute encoder".to_string())?;
         Ok(Commands {
             command_buffer,
-            encoder,
+            encoder: RefCell::new(Some(encoder)),
             runtime: self,
             finished: false,
         })
@@ -285,7 +400,7 @@ impl MetalRuntime {
 
 pub(crate) struct Commands<'a> {
     command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    encoder: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    encoder: RefCell<Option<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>>>,
     runtime: &'a MetalRuntime,
     finished: bool,
 }
@@ -293,6 +408,22 @@ pub(crate) struct Commands<'a> {
 impl Commands<'_> {
     pub(crate) fn runtime(&self) -> &MetalRuntime {
         self.runtime
+    }
+
+    fn ensure_compute_encoder(&self) {
+        if self.encoder.borrow().is_none() {
+            let encoder = self
+                .command_buffer
+                .computeCommandEncoder()
+                .expect("Metal failed to create a compute encoder");
+            *self.encoder.borrow_mut() = Some(encoder);
+        }
+    }
+
+    fn end_compute_encoder(&self) {
+        if let Some(encoder) = self.encoder.borrow_mut().take() {
+            encoder.endEncoding();
+        }
     }
 
     pub(crate) fn dispatch<T: MetalParams>(
@@ -303,26 +434,29 @@ impl Commands<'_> {
         grid: MTLSize,
         group: MTLSize,
     ) {
-        self.encoder.setComputePipelineState(pipeline);
+        self.ensure_compute_encoder();
+        let encoder = self.encoder.borrow();
+        let encoder = encoder
+            .as_ref()
+            .expect("compute encoder must be active outside MPS dispatch");
+        encoder.setComputePipelineState(pipeline);
         for (index, buffer) in buffers.iter().enumerate() {
             // SAFETY: Buffers are retained by the command buffer, offsets are
             // zero, and kernel bindings are centralized in the engine.
             unsafe {
-                self.encoder
-                    .setBuffer_offset_atIndex(Some(&buffer.raw), 0, index);
+                encoder.setBuffer_offset_atIndex(Some(&buffer.raw), 0, index);
             }
         }
         // SAFETY: `parameters` is a repr(C), Copy POD value in every caller and
         // remains alive until Metal has copied these inline bytes.
         unsafe {
-            self.encoder.setBytes_length_atIndex(
+            encoder.setBytes_length_atIndex(
                 NonNull::from(parameters).cast::<c_void>(),
                 size_of::<T>(),
                 buffers.len(),
             );
         }
-        self.encoder
-            .dispatchThreads_threadsPerThreadgroup(grid, group);
+        encoder.dispatchThreads_threadsPerThreadgroup(grid, group);
     }
 
     pub(crate) fn dispatch_threadgroups<T: MetalParams>(
@@ -333,28 +467,60 @@ impl Commands<'_> {
         groups: MTLSize,
         threads: MTLSize,
     ) {
-        self.encoder.setComputePipelineState(pipeline);
+        self.ensure_compute_encoder();
+        let encoder = self.encoder.borrow();
+        let encoder = encoder
+            .as_ref()
+            .expect("compute encoder must be active outside MPS dispatch");
+        encoder.setComputePipelineState(pipeline);
         for (index, buffer) in buffers.iter().enumerate() {
             // SAFETY: See `dispatch`; this variant changes only grid semantics.
             unsafe {
-                self.encoder
-                    .setBuffer_offset_atIndex(Some(&buffer.raw), 0, index);
+                encoder.setBuffer_offset_atIndex(Some(&buffer.raw), 0, index);
             }
         }
         // SAFETY: All parameter structs passed here are repr(C), Copy PODs.
         unsafe {
-            self.encoder.setBytes_length_atIndex(
+            encoder.setBytes_length_atIndex(
                 NonNull::from(parameters).cast::<c_void>(),
                 size_of::<T>(),
                 buffers.len(),
             );
         }
-        self.encoder
-            .dispatchThreadgroups_threadsPerThreadgroup(groups, threads);
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(groups, threads);
+    }
+
+    pub(crate) fn mps_matmul(
+        &self,
+        lhs: &Buffer,
+        rhs: &Buffer,
+        output: &Buffer,
+        rows: usize,
+        columns: usize,
+        inner: usize,
+    ) -> Result<(), String> {
+        self.end_compute_encoder();
+        let lhs_matrix = self.runtime.mps_matrix(lhs, rows, inner)?;
+        let rhs_matrix = self.runtime.mps_matrix(rhs, inner, columns)?;
+        let output_matrix = self.runtime.mps_matrix(output, rows, columns)?;
+        // SAFETY: Matrix descriptors exactly describe M x K, K x N, and M x N
+        // packed FP32 buffers on the same Metal device.
+        unsafe {
+            let kernel = self.runtime.mps_matmul_kernel(rows, columns, inner);
+            kernel.encodeToCommandBuffer_leftMatrix_rightMatrix_resultMatrix(
+                &self.command_buffer,
+                &lhs_matrix,
+                &rhs_matrix,
+                &output_matrix,
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn finish(mut self) -> Result<(), String> {
-        self.encoder.endEncoding();
+        if let Some(encoder) = self.encoder.borrow_mut().take() {
+            encoder.endEncoding();
+        }
         self.command_buffer.commit();
         self.command_buffer.waitUntilCompleted();
         self.finished = true;
@@ -368,7 +534,9 @@ impl Commands<'_> {
 impl Drop for Commands<'_> {
     fn drop(&mut self) {
         if !self.finished {
-            self.encoder.endEncoding();
+            if let Some(encoder) = self.encoder.get_mut().take() {
+                encoder.endEncoding();
+            }
         }
     }
 }
@@ -447,8 +615,8 @@ mod tests {
         let bias = runtime.upload(&[0.5_f32, -0.5]).unwrap();
         let output = runtime.empty::<f32>(4).unwrap();
         let commands = runtime.commands().unwrap();
-        commands.dispatch(
-            &runtime.pipelines.matmul,
+        commands.dispatch_threadgroups(
+            &runtime.pipelines.matmul_microtile,
             &[&lhs, &rhs, &bias, &output],
             &MatMulParams {
                 rows: 2,
@@ -458,8 +626,8 @@ mod tests {
                 activation: 0,
                 storage: 0,
             },
-            grid(16, 16, 1),
-            grid(16, 16, 1),
+            grid(1, 1, 1),
+            grid(32, 8, 1),
         );
         commands.finish().unwrap();
         assert_eq!(output.read::<f32>(4).unwrap(), [58.5, 63.5, 139.5, 153.5]);
