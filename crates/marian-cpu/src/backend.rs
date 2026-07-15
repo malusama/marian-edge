@@ -470,6 +470,7 @@ impl TranslationBackend for CpuBackend {
             device: std::env::consts::ARCH.into(),
             model: self.model_id.clone(),
             precision: self.precision.clone(),
+            attention: Some("streaming-exact-simd-value".into()),
             supports_batching: true,
         }
     }
@@ -605,6 +606,7 @@ impl TranslationBackend for Q8CpuBackend {
             device: std::env::consts::ARCH.into(),
             model: self.model_id.clone(),
             precision: "q8".into(),
+            attention: Some("streaming-exact-simd-value".into()),
             supports_batching: true,
         }
     }

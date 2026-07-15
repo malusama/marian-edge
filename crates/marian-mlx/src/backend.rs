@@ -102,6 +102,7 @@ impl TranslationBackend for MetalBackend {
             device: self.device.clone(),
             model: self.model_id.clone(),
             precision: self.precision.clone(),
+            attention: Some(self.engine.attention_label()),
             supports_batching: true,
         }
     }

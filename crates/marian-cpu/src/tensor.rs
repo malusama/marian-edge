@@ -101,18 +101,14 @@ pub(crate) fn matmul_into(
     }
     if let Some(bias) = bias {
         for row in output.chunks_exact_mut(rhs.cols) {
-            for (value, &offset) in row.iter_mut().zip(&bias.values) {
-                *value += offset;
-            }
+            add_in_place(row, &bias.values);
         }
     }
     Ok(())
 }
 
 pub(crate) fn relu_in_place(values: &mut [f32]) {
-    for value in values {
-        *value = value.max(0.0);
-    }
+    relu_values_in_place(values);
 }
 
 pub(crate) fn residual_layer_norm(
@@ -209,8 +205,8 @@ pub(crate) fn ssru_update_layer_norm_into(
         let gate = 1.0 / (1.0 + (-forget_pre[index]).exp());
         let next = gate * state[index] + (1.0 - gate) * candidate[index];
         state[index] = next;
-        output[index] = residual[index] + next.max(0.0);
     }
+    relu_residual(state, residual, output);
     for row in output.chunks_exact_mut(dim) {
         normalize_row(row, scale.values(), bias.values());
     }
@@ -302,15 +298,14 @@ pub(crate) fn attention_into(
 
                 let output_base =
                     (batch_index * query_length + query_index) * dim + head * head_dim;
-                for dim_index in 0..head_dim {
-                    let mut attended = 0.0_f32;
-                    for (key_index, &score) in active_scores.iter().enumerate() {
-                        let value_index = (batch_index * key_length + key_index) * dim
-                            + head * head_dim
-                            + dim_index;
-                        attended += score * value[value_index];
-                    }
-                    output[output_base + dim_index] = attended;
+                let output_head = &mut output[output_base..output_base + head_dim];
+                for (key_index, &score) in active_scores.iter().enumerate() {
+                    let value_base = (batch_index * key_length + key_index) * dim + head * head_dim;
+                    weighted_add_in_place(
+                        output_head,
+                        &value[value_base..value_base + head_dim],
+                        score,
+                    );
                 }
             }
         }
@@ -419,6 +414,156 @@ fn add_slices(lhs: &[f32], rhs: &[f32], output: &mut [f32]) {
     }
 }
 
+fn add_in_place(values: &mut [f32], offsets: &[f32]) {
+    debug_assert_eq!(values.len(), offsets.len());
+    let mut index = 0;
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::arch::aarch64::{vaddq_f32, vld1q_f32, vst1q_f32};
+        while index + 4 <= values.len() {
+            // SAFETY: The loop condition proves four elements in both slices.
+            unsafe {
+                let sum = vaddq_f32(
+                    vld1q_f32(values.as_ptr().add(index)),
+                    vld1q_f32(offsets.as_ptr().add(index)),
+                );
+                vst1q_f32(values.as_mut_ptr().add(index), sum);
+            }
+            index += 4;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected and the helper bounds every access.
+            index = unsafe { add_in_place_avx2(values, offsets) };
+        }
+    }
+    for index in index..values.len() {
+        values[index] += offsets[index];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn add_in_place_avx2(values: &mut [f32], offsets: &[f32]) -> usize {
+    use core::arch::x86_64::{_mm256_add_ps, _mm256_loadu_ps, _mm256_storeu_ps};
+    let mut index = 0;
+    while index + 8 <= values.len() {
+        // SAFETY: The loop condition proves eight elements in both slices.
+        unsafe {
+            let sum = _mm256_add_ps(
+                _mm256_loadu_ps(values.as_ptr().add(index)),
+                _mm256_loadu_ps(offsets.as_ptr().add(index)),
+            );
+            _mm256_storeu_ps(values.as_mut_ptr().add(index), sum);
+        }
+        index += 8;
+    }
+    index
+}
+
+fn weighted_add_in_place(output: &mut [f32], values: &[f32], weight: f32) {
+    debug_assert_eq!(output.len(), values.len());
+    let mut index = 0;
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::arch::aarch64::{vaddq_f32, vdupq_n_f32, vld1q_f32, vmulq_f32, vst1q_f32};
+        // SAFETY: NEON is baseline on AArch64; each iteration is bounds-checked.
+        let weight_vector = unsafe { vdupq_n_f32(weight) };
+        while index + 4 <= output.len() {
+            unsafe {
+                let product = vmulq_f32(vld1q_f32(values.as_ptr().add(index)), weight_vector);
+                let sum = vaddq_f32(vld1q_f32(output.as_ptr().add(index)), product);
+                vst1q_f32(output.as_mut_ptr().add(index), sum);
+            }
+            index += 4;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected and the helper bounds every access.
+            index = unsafe { weighted_add_in_place_avx2(output, values, weight) };
+        }
+    }
+    for index in index..output.len() {
+        output[index] += values[index] * weight;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn weighted_add_in_place_avx2(output: &mut [f32], values: &[f32], weight: f32) -> usize {
+    use core::arch::x86_64::{
+        _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
+    };
+    let mut index = 0;
+    let weight_vector = _mm256_set1_ps(weight);
+    while index + 8 <= output.len() {
+        // SAFETY: The loop condition proves eight elements in both slices.
+        unsafe {
+            let product = _mm256_mul_ps(_mm256_loadu_ps(values.as_ptr().add(index)), weight_vector);
+            let sum = _mm256_add_ps(_mm256_loadu_ps(output.as_ptr().add(index)), product);
+            _mm256_storeu_ps(output.as_mut_ptr().add(index), sum);
+        }
+        index += 8;
+    }
+    index
+}
+
+fn relu_values_in_place(values: &mut [f32]) {
+    let mut index = 0;
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::arch::aarch64::{vdupq_n_f32, vld1q_f32, vmaxq_f32, vst1q_f32};
+        // SAFETY: NEON is baseline on AArch64; each iteration is bounds-checked.
+        let zero = unsafe { vdupq_n_f32(0.0) };
+        while index + 4 <= values.len() {
+            unsafe {
+                let positive = vmaxq_f32(vld1q_f32(values.as_ptr().add(index)), zero);
+                vst1q_f32(values.as_mut_ptr().add(index), positive);
+            }
+            index += 4;
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected and the helper bounds every access.
+            index = unsafe { relu_values_in_place_avx2(values) };
+        }
+    }
+    for value in &mut values[index..] {
+        *value = value.max(0.0);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn relu_values_in_place_avx2(values: &mut [f32]) -> usize {
+    use core::arch::x86_64::{_mm256_loadu_ps, _mm256_max_ps, _mm256_setzero_ps, _mm256_storeu_ps};
+    let mut index = 0;
+    let zero = _mm256_setzero_ps();
+    while index + 8 <= values.len() {
+        // SAFETY: The loop condition proves eight elements in the slice.
+        unsafe {
+            let positive = _mm256_max_ps(_mm256_loadu_ps(values.as_ptr().add(index)), zero);
+            _mm256_storeu_ps(values.as_mut_ptr().add(index), positive);
+        }
+        index += 8;
+    }
+    index
+}
+
+fn relu_residual(state: &[f32], residual: &[f32], output: &mut [f32]) {
+    debug_assert_eq!(state.len(), residual.len());
+    debug_assert_eq!(state.len(), output.len());
+    output.copy_from_slice(state);
+    relu_values_in_place(output);
+    add_in_place(output, residual);
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn add_slices_avx2(lhs: &[f32], rhs: &[f32], output: &mut [f32]) -> usize {
@@ -446,9 +591,51 @@ fn softmax_in_place(values: &mut [f32]) {
         sum += *value;
     }
     let inverse_sum = 1.0 / sum;
-    for value in values {
-        *value *= inverse_sum;
+    scale_in_place(values, inverse_sum);
+}
+
+fn scale_in_place(values: &mut [f32], scale: f32) {
+    let mut index = 0;
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::arch::aarch64::{vdupq_n_f32, vld1q_f32, vmulq_f32, vst1q_f32};
+        // SAFETY: NEON is baseline on AArch64; each iteration is bounds-checked.
+        let scale_vector = unsafe { vdupq_n_f32(scale) };
+        while index + 4 <= values.len() {
+            unsafe {
+                let scaled = vmulq_f32(vld1q_f32(values.as_ptr().add(index)), scale_vector);
+                vst1q_f32(values.as_mut_ptr().add(index), scaled);
+            }
+            index += 4;
+        }
     }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 was detected and the helper bounds every access.
+            index = unsafe { scale_in_place_avx2(values, scale) };
+        }
+    }
+    for value in &mut values[index..] {
+        *value *= scale;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn scale_in_place_avx2(values: &mut [f32], scale: f32) -> usize {
+    use core::arch::x86_64::{_mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps};
+    let mut index = 0;
+    let scale_vector = _mm256_set1_ps(scale);
+    while index + 8 <= values.len() {
+        // SAFETY: The loop condition proves eight elements in the slice.
+        unsafe {
+            let scaled = _mm256_mul_ps(_mm256_loadu_ps(values.as_ptr().add(index)), scale_vector);
+            _mm256_storeu_ps(values.as_mut_ptr().add(index), scaled);
+        }
+        index += 8;
+    }
+    index
 }
 
 fn checked_product(values: &[usize], label: &str) -> Result<usize, String> {
@@ -470,8 +657,9 @@ fn to_isize(value: usize, label: &str) -> Result<isize, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Matrix, add_slices, attention, matmul, residual_layer_norm, select_token,
-        ssru_update_layer_norm,
+        Matrix, add_in_place, add_slices, attention, matmul, relu_residual, relu_values_in_place,
+        residual_layer_norm, scale_in_place, select_token, ssru_update_layer_norm,
+        weighted_add_in_place,
     };
 
     fn matrix(values: &[f32], rows: usize, cols: usize) -> Matrix {
@@ -500,6 +688,58 @@ mod tests {
             add_slices(&lhs, &rhs, &mut output);
             let expected = lhs.iter().zip(&rhs).map(|(a, b)| a + b).collect::<Vec<_>>();
             assert_eq!(output, expected, "length {length}");
+        }
+    }
+
+    #[test]
+    fn simd_elementwise_helpers_match_scalar_for_every_tail() {
+        for length in 0..=65 {
+            let values = (0..length)
+                .map(|index| index as f32 * 0.125 - 3.0)
+                .collect::<Vec<_>>();
+            let offsets = (0..length)
+                .map(|index| index as f32 * -0.25 + 1.0)
+                .collect::<Vec<_>>();
+
+            let mut added = values.clone();
+            add_in_place(&mut added, &offsets);
+            let expected = values
+                .iter()
+                .zip(&offsets)
+                .map(|(value, offset)| value + offset)
+                .collect::<Vec<_>>();
+            assert_eq!(added, expected, "add length {length}");
+
+            let mut weighted = values.clone();
+            weighted_add_in_place(&mut weighted, &offsets, 0.75);
+            let expected = values
+                .iter()
+                .zip(&offsets)
+                .map(|(value, offset)| value + offset * 0.75)
+                .collect::<Vec<_>>();
+            assert_eq!(weighted, expected, "weighted length {length}");
+
+            let mut relu = values.clone();
+            relu_values_in_place(&mut relu);
+            let expected = values
+                .iter()
+                .map(|value| value.max(0.0))
+                .collect::<Vec<_>>();
+            assert_eq!(relu, expected, "relu length {length}");
+
+            let mut combined = vec![0.0; length];
+            relu_residual(&values, &offsets, &mut combined);
+            let expected = values
+                .iter()
+                .zip(&offsets)
+                .map(|(value, residual)| value.max(0.0) + residual)
+                .collect::<Vec<_>>();
+            assert_eq!(combined, expected, "relu residual length {length}");
+
+            let mut scaled = values.clone();
+            scale_in_place(&mut scaled, 0.625);
+            let expected = values.iter().map(|value| value * 0.625).collect::<Vec<_>>();
+            assert_eq!(scaled, expected, "scale length {length}");
         }
     }
 

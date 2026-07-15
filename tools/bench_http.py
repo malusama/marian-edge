@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--from-lang", default="en")
     parser.add_argument("--to-lang", default="zh")
+    parser.add_argument("--max-output-tokens", type=int)
     parser.add_argument("--model-dir", type=Path)
     parser.add_argument("--pid", type=int, help="server PID to sample for peak RSS")
     parser.add_argument("--threads", type=int)
@@ -37,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.requests < 1 or args.concurrency < 1 or args.warmup < 0:
         parser.error("requests/concurrency must be positive and warmup non-negative")
+    if args.max_output_tokens is not None and args.max_output_tokens < 1:
+        parser.error("max-output-tokens must be positive")
     return args
 
 
@@ -167,7 +170,12 @@ class RssSampler:
 
 
 def request_bodies(
-    url: str, texts: list[str], count: int, source: str, target: str
+    url: str,
+    texts: list[str],
+    count: int,
+    source: str,
+    target: str,
+    max_output_tokens: int | None,
 ) -> tuple[list[bytes], int]:
     if urllib.parse.urlsplit(url).path.rstrip("/") == "/imme":
         body = json.dumps(
@@ -175,10 +183,12 @@ def request_bodies(
             ensure_ascii=False,
         ).encode()
         return [body] * count, len(texts)
-    bodies = [
-        json.dumps({"text": texts[index % len(texts)], "from": source, "to": target}, ensure_ascii=False).encode()
-        for index in range(count)
-    ]
+    bodies = []
+    for index in range(count):
+        payload = {"text": texts[index % len(texts)], "from": source, "to": target}
+        if max_output_tokens is not None:
+            payload["max_output_tokens"] = max_output_tokens
+        bodies.append(json.dumps(payload, ensure_ascii=False).encode())
     return bodies, 1
 
 
@@ -192,13 +202,23 @@ def main() -> None:
     args = parse_args()
     texts, corpus_sha256 = load_corpus(args.corpus, args.text)
     warmup_bodies, _ = request_bodies(
-        args.url, texts, max(args.warmup, 1), args.from_lang, args.to_lang
+        args.url,
+        texts,
+        max(args.warmup, 1),
+        args.from_lang,
+        args.to_lang,
+        args.max_output_tokens,
     )
     for index in range(args.warmup):
         request(args.url, warmup_bodies[index % len(warmup_bodies)])
 
     bodies, items_per_request = request_bodies(
-        args.url, texts, args.requests, args.from_lang, args.to_lang
+        args.url,
+        texts,
+        args.requests,
+        args.from_lang,
+        args.to_lang,
+        args.max_output_tokens,
     )
     sampler = RssSampler(args.pid)
     sampler.start()
@@ -235,6 +255,7 @@ def main() -> None:
             "concurrency": args.concurrency,
             "threads": args.threads,
             "warmup": args.warmup,
+            "max_output_tokens": args.max_output_tokens,
         },
         "results": {
             "wall_seconds": round(wall, 6),

@@ -142,6 +142,7 @@ pub(crate) struct Pipelines {
     pub(crate) attention_scores: PipelineState,
     pub(crate) attention_softmax: PipelineState,
     pub(crate) attention_apply: PipelineState,
+    pub(crate) attention_flash: PipelineState,
     pub(crate) output_logits: PipelineState,
     pub(crate) argmax: PipelineState,
 }
@@ -192,6 +193,7 @@ impl MetalRuntime {
             attention_scores: load("attention_scores_f32")?,
             attention_softmax: load("attention_softmax_f32")?,
             attention_apply: load("attention_apply_f32")?,
+            attention_flash: load("attention_flash_f32")?,
             output_logits: load("output_logits_f32")?,
             argmax: load("argmax_f32")?,
         };
@@ -549,5 +551,79 @@ mod tests {
             assert!((actual - expected).abs() < 1.0e-6);
         }
         assert_eq!(selected.read::<u32>(2).unwrap(), [1, 0]);
+    }
+
+    #[test]
+    fn flash_attention_matches_classic_attention_with_padding() {
+        const BATCH: usize = 2;
+        const QUERY: usize = 3;
+        const KEY: usize = 5;
+        const DIM: usize = 48;
+        const HEADS: usize = 1;
+
+        let runtime = MetalRuntime::new().unwrap();
+        let query_values = (0..BATCH * QUERY * DIM)
+            .map(|index| ((index * 17 % 101) as f32 - 50.0) / 37.0)
+            .collect::<Vec<_>>();
+        let key_values = (0..BATCH * KEY * DIM)
+            .map(|index| ((index * 29 % 113) as f32 - 56.0) / 41.0)
+            .collect::<Vec<_>>();
+        let value_values = (0..BATCH * KEY * DIM)
+            .map(|index| ((index * 43 % 127) as f32 - 63.0) / 53.0)
+            .collect::<Vec<_>>();
+        let query = runtime.upload(&query_values).unwrap();
+        let key = runtime.upload(&key_values).unwrap();
+        let value = runtime.upload(&value_values).unwrap();
+        let lengths = runtime.upload(&[5_u32, 3]).unwrap();
+        let classic_scores = runtime.empty::<f32>(BATCH * HEADS * QUERY * KEY).unwrap();
+        let classic_output = runtime.empty::<f32>(BATCH * QUERY * DIM).unwrap();
+        let flash_output = runtime.empty::<f32>(BATCH * QUERY * DIM).unwrap();
+        let params = AttentionParams {
+            batch: BATCH as u32,
+            query_length: QUERY as u32,
+            key_length: KEY as u32,
+            dim: DIM as u32,
+            heads: HEADS as u32,
+        };
+
+        let commands = runtime.commands().unwrap();
+        commands.dispatch(
+            &runtime.pipelines.attention_scores,
+            &[&query, &key, &lengths, &classic_scores],
+            &params,
+            grid(KEY, QUERY, BATCH * HEADS),
+            grid(8, 8, 1),
+        );
+        commands.dispatch_threadgroups(
+            &runtime.pipelines.attention_softmax,
+            &[&classic_scores],
+            &params,
+            grid(QUERY, BATCH * HEADS, 1),
+            grid(128, 1, 1),
+        );
+        commands.dispatch(
+            &runtime.pipelines.attention_apply,
+            &[&classic_scores, &value, &classic_output],
+            &params,
+            grid(DIM, QUERY, BATCH),
+            grid(32, 4, 1),
+        );
+        commands.dispatch_threadgroups(
+            &runtime.pipelines.attention_flash,
+            &[&query, &key, &lengths, &value, &flash_output],
+            &params,
+            grid(QUERY.div_ceil(4), BATCH * HEADS, 1),
+            grid(32, 1, 1),
+        );
+        commands.finish().unwrap();
+
+        let classic = classic_output.read::<f32>(BATCH * QUERY * DIM).unwrap();
+        let flash = flash_output.read::<f32>(BATCH * QUERY * DIM).unwrap();
+        for (index, (classic, flash)) in classic.iter().zip(&flash).enumerate() {
+            assert!(
+                (classic - flash).abs() < 2.0e-5,
+                "attention output {index} differs: classic={classic}, flash={flash}"
+            );
+        }
     }
 }

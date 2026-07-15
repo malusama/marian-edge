@@ -558,6 +558,7 @@ mod tests {
                 device: "none".into(),
                 model: "test".into(),
                 precision: "n/a".into(),
+                attention: None,
                 supports_batching: true,
             }
         }
@@ -582,6 +583,7 @@ mod tests {
                 device: "none".into(),
                 model: "test".into(),
                 precision: "n/a".into(),
+                attention: None,
                 supports_batching: true,
             }
         }
@@ -613,6 +615,7 @@ mod tests {
                 device: "none".into(),
                 model: "test".into(),
                 precision: "n/a".into(),
+                attention: None,
                 supports_batching: true,
             }
         }

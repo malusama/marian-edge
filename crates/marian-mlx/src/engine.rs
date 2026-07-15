@@ -17,6 +17,77 @@ const MAXIMUM_POSITION: usize = 4_096;
 const MAXIMUM_BATCH: usize = 256;
 const MAXIMUM_SCORE_BYTES: usize = 1_024 * 1_024 * 1_024;
 const TILE: usize = 16;
+const FLASH_ATTENTION_THREADS: usize = 32;
+const FLASH_ATTENTION_MAX_HEAD_DIM: usize = 64;
+const FLASH_ATTENTION_QUERY_TILE: usize = 4;
+const DEFAULT_FLASH_ATTENTION_THRESHOLD: usize = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttentionMode {
+    Auto,
+    Classic,
+    Flash,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AttentionDispatch {
+    mode: AttentionMode,
+    threshold: usize,
+}
+
+impl AttentionDispatch {
+    fn from_env() -> Result<Self, String> {
+        let mode = match std::env::var("MARIAN_MLX_METAL_ATTENTION")
+            .unwrap_or_else(|_| "auto".into())
+            .as_str()
+        {
+            "auto" => AttentionMode::Auto,
+            "classic" => AttentionMode::Classic,
+            "flash" => AttentionMode::Flash,
+            value => {
+                return Err(format!(
+                    "unsupported MARIAN_MLX_METAL_ATTENTION {value:?}; expected auto, classic, or flash"
+                ));
+            }
+        };
+        let threshold = std::env::var("MARIAN_MLX_METAL_FLASH_THRESHOLD")
+            .ok()
+            .map(|value| {
+                value.parse::<usize>().map_err(|_| {
+                    format!("MARIAN_MLX_METAL_FLASH_THRESHOLD {value:?} is not an integer")
+                })
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_FLASH_ATTENTION_THRESHOLD);
+        if !(1..=MAXIMUM_POSITION).contains(&threshold) {
+            return Err(format!(
+                "MARIAN_MLX_METAL_FLASH_THRESHOLD must be between 1 and {MAXIMUM_POSITION}"
+            ));
+        }
+        Ok(Self { mode, threshold })
+    }
+
+    fn use_flash(self, query_length: usize, key_length: usize, head_dim: usize) -> bool {
+        if head_dim > FLASH_ATTENTION_MAX_HEAD_DIM {
+            return false;
+        }
+        match self.mode {
+            AttentionMode::Classic => false,
+            AttentionMode::Flash => true,
+            AttentionMode::Auto => {
+                query_length == 1 || query_length == key_length && query_length >= self.threshold
+            }
+        }
+    }
+
+    fn label(self) -> String {
+        match self.mode {
+            AttentionMode::Classic => "classic".into(),
+            AttentionMode::Flash => "flash-q4".into(),
+            AttentionMode::Auto => format!("flash-q4-auto@{}", self.threshold),
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -172,6 +243,7 @@ pub(crate) struct MetalEngine {
     scratch: RefCell<MetalBufferArena>,
     scratch_active: Cell<bool>,
     storage: MetalStorage,
+    attention: AttentionDispatch,
 }
 
 #[derive(Default)]
@@ -215,6 +287,7 @@ impl MetalEngine {
         architecture: &Architecture,
     ) -> Result<Self, String> {
         let runtime = MetalRuntime::new()?;
+        let attention = AttentionDispatch::from_env()?;
         let storage = runtime.storage();
         let model = ModelWeights::load(&runtime, weights_path, architecture)?;
         let positions = runtime.upload(&make_positions(architecture.model_dim))?;
@@ -239,6 +312,7 @@ impl MetalEngine {
             scratch: RefCell::new(MetalBufferArena::default()),
             scratch_active: Cell::new(false),
             storage,
+            attention,
         })
     }
 
@@ -248,6 +322,10 @@ impl MetalEngine {
 
     pub(crate) fn precision(&self) -> &'static str {
         self.storage.label()
+    }
+
+    pub(crate) fn attention_label(&self) -> String {
+        self.attention.label()
     }
 
     pub(crate) fn is_ready(&self) -> bool {
@@ -828,6 +906,29 @@ impl MetalEngine {
         query_length: usize,
         key_length: usize,
     ) -> Result<Buffer, String> {
+        let head_dim = self.dim / self.heads;
+        if self.attention.use_flash(query_length, key_length, head_dim) {
+            let output = self.f32_buffer(checked_product(&[batch, query_length, self.dim])?)?;
+            let params = AttentionParams {
+                batch: to_u32(batch, "attention batch")?,
+                query_length: to_u32(query_length, "attention query length")?,
+                key_length: to_u32(key_length, "attention key length")?,
+                dim: to_u32(self.dim, "model dimension")?,
+                heads: to_u32(self.heads, "attention heads")?,
+            };
+            commands.dispatch_threadgroups(
+                &commands.runtime().pipelines.attention_flash,
+                &[query, key, lengths, value, &output],
+                &params,
+                grid(
+                    query_length.div_ceil(FLASH_ATTENTION_QUERY_TILE),
+                    batch * self.heads,
+                    1,
+                ),
+                grid(FLASH_ATTENTION_THREADS, 1, 1),
+            );
+            return Ok(output);
+        }
         let score_elements = checked_product(&[batch, self.heads, query_length, key_length])?;
         let score_bytes = checked_mul(score_elements, size_of::<f32>())?;
         if score_bytes > MAXIMUM_SCORE_BYTES {
@@ -1227,7 +1328,32 @@ fn to_u32(value: usize, label: &str) -> Result<u32, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::make_positions;
+    use super::{AttentionDispatch, AttentionMode, make_positions};
+
+    #[test]
+    fn attention_dispatch_respects_mode_shape_threshold_and_head_limit() {
+        let classic = AttentionDispatch {
+            mode: AttentionMode::Classic,
+            threshold: 1,
+        };
+        assert!(!classic.use_flash(128, 128, 48));
+
+        let flash = AttentionDispatch {
+            mode: AttentionMode::Flash,
+            threshold: 4_096,
+        };
+        assert!(flash.use_flash(7, 19, 48));
+        assert!(!flash.use_flash(7, 19, 65));
+
+        let auto = AttentionDispatch {
+            mode: AttentionMode::Auto,
+            threshold: 128,
+        };
+        assert!(auto.use_flash(1, 512, 48));
+        assert!(!auto.use_flash(127, 127, 48));
+        assert!(auto.use_flash(128, 128, 48));
+        assert!(!auto.use_flash(128, 256, 48));
+    }
 
     #[test]
     fn sinusoidal_positions_are_grouped_sin_then_cos() {

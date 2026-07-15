@@ -52,6 +52,8 @@ pub struct BackendInfo {
     pub device: String,
     pub model: String,
     pub precision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention: Option<String>,
     pub supports_batching: bool,
 }
 

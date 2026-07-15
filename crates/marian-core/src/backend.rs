@@ -33,6 +33,7 @@ impl TranslationBackend for EchoBackend {
             device: "none".into(),
             model: "development-only".into(),
             precision: "n/a".into(),
+            attention: None,
             supports_batching: true,
         }
     }
