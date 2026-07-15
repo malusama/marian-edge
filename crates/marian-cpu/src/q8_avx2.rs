@@ -80,8 +80,7 @@ pub(crate) fn dot_u8_i8(
         // slices have equal lengths, which is the only memory precondition of
         // `dot_i64_avx2`; that function bounds every vector and scalar load.
         let accumulator = unsafe { dot_i64_avx2(activations, weights, activation_zero_point) };
-        return i32::try_from(accumulator)
-            .map_err(|_| Avx2Q8Error::AccumulatorOverflow(accumulator));
+        i32::try_from(accumulator).map_err(|_| Avx2Q8Error::AccumulatorOverflow(accumulator))
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -180,7 +179,7 @@ pub(crate) fn gemm_u8_i8(
                 }
                 Ok::<(), Avx2Q8Error>(())
             })?;
-        return Ok(output);
+        Ok(output)
     }
 
     #[cfg(not(target_arch = "x86_64"))]
@@ -281,7 +280,7 @@ unsafe fn dot4_i64_avx2(
             // caller, and the widened subtraction remains within i16.
             let activation_i16 =
                 unsafe { _mm256_sub_epi16(_mm256_cvtepu8_epi16(activation_bytes), zero_points) };
-            for weight_row in 0..4 {
+            for (weight_row, accumulator) in accumulators.iter_mut().enumerate() {
                 let weight_index = weight_row * inner_dim + index;
                 // SAFETY: `four_weight_rows` contains four complete
                 // `inner_dim` rows and `index + 16 <= inner_dim`.
@@ -300,8 +299,7 @@ unsafe fn dot4_i64_avx2(
                 // SAFETY: same runtime AVX2 guarantee as above.
                 let pairs = unsafe { _mm256_madd_epi16(activation_i16, weight_i16) };
                 // SAFETY: same runtime AVX2 guarantee and bounded lane sum.
-                accumulators[weight_row] =
-                    unsafe { _mm256_add_epi32(accumulators[weight_row], pairs) };
+                *accumulator = unsafe { _mm256_add_epi32(*accumulator, pairs) };
             }
             index += 16;
         }

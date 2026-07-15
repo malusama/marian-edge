@@ -139,6 +139,7 @@ unsafe fn dot_u8_i8_dotprod(activations: &[u8], weights: &[i8]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{dot_u8_i8, dot_u8_i8_scalar};
+    #[cfg(target_arch = "aarch64")]
     use crate::Q8Linear;
 
     #[test]
