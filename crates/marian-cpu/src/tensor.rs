@@ -499,7 +499,8 @@ unsafe fn weighted_add_in_place_avx2(output: &mut [f32], values: &[f32], weight:
         _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps,
     };
     let mut index = 0;
-    let weight_vector = _mm256_set1_ps(weight);
+    // SAFETY: The function is compiled with AVX2 enabled.
+    let weight_vector = unsafe { _mm256_set1_ps(weight) };
     while index + 8 <= output.len() {
         // SAFETY: The loop condition proves eight elements in both slices.
         unsafe {
@@ -544,7 +545,8 @@ fn relu_values_in_place(values: &mut [f32]) {
 unsafe fn relu_values_in_place_avx2(values: &mut [f32]) -> usize {
     use core::arch::x86_64::{_mm256_loadu_ps, _mm256_max_ps, _mm256_setzero_ps, _mm256_storeu_ps};
     let mut index = 0;
-    let zero = _mm256_setzero_ps();
+    // SAFETY: The function is compiled with AVX2 enabled.
+    let zero = unsafe { _mm256_setzero_ps() };
     while index + 8 <= values.len() {
         // SAFETY: The loop condition proves eight elements in the slice.
         unsafe {
@@ -626,7 +628,8 @@ fn scale_in_place(values: &mut [f32], scale: f32) {
 unsafe fn scale_in_place_avx2(values: &mut [f32], scale: f32) -> usize {
     use core::arch::x86_64::{_mm256_loadu_ps, _mm256_mul_ps, _mm256_set1_ps, _mm256_storeu_ps};
     let mut index = 0;
-    let scale_vector = _mm256_set1_ps(scale);
+    // SAFETY: The function is compiled with AVX2 enabled.
+    let scale_vector = unsafe { _mm256_set1_ps(scale) };
     while index + 8 <= values.len() {
         // SAFETY: The loop condition proves eight elements in the slice.
         unsafe {
