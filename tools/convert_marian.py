@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert a Firefox Translations Marian NPZ release to MLX safetensors."""
+"""Convert a Firefox Translations Marian NPZ release to runtime safetensors."""
 
 from __future__ import annotations
 
@@ -16,7 +16,11 @@ from safetensors import safe_open
 from safetensors.numpy import save_file
 
 
-FORMAT = "marian-mlx.transformer-ssru.v1"
+MANIFEST_FORMAT = "marian-edge.transformer-ssru.v1"
+# Keep the byte-level FP32 artifact stable. This metadata labels the existing
+# safetensors layout; changing the manifest namespace must not rewrite 166 MB
+# of otherwise identical weights or invalidate its published checksum.
+WEIGHTS_FORMAT = "marian-mlx.transformer-ssru.v1"
 EXPECTED_MODEL_SHA256 = (
     "9604368d0fb19aa431a82824cedd92205a68512b89086cbe8c4d8bd1585a8950"
 )
@@ -217,7 +221,7 @@ def main() -> None:
         converted,
         str(weights_path),
         metadata={
-            "format": FORMAT,
+            "format": WEIGHTS_FORMAT,
             "source_npz_sha256": model_hash,
             "marian_config": graph_config,
         },
@@ -235,7 +239,7 @@ def main() -> None:
         shortlist_hash = copy_asset(args.shortlist, args.output / shortlist_name)
 
     manifest = {
-        "format": FORMAT,
+        "format": MANIFEST_FORMAT,
         "model_id": args.model_id,
         "source_lang": args.source_lang,
         "target_lang": args.target_lang,

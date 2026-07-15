@@ -4,7 +4,7 @@
 //! graph receive explicit values, which keeps tests deterministic and permits
 //! multiple differently configured backends in one process.
 
-const MAXIMUM_POSITION: usize = 4_096;
+use marian_model::MAXIMUM_POSITION;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MetalPrecision {
@@ -69,7 +69,7 @@ impl MetalConfig {
     }
 
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, String> {
-        let precision = match lookup("MARIAN_MLX_METAL_PRECISION")
+        let precision = match setting("METAL_PRECISION", &mut lookup)?
             .unwrap_or_else(|| "fp32".into())
             .as_str()
         {
@@ -81,7 +81,7 @@ impl MetalConfig {
                 ));
             }
         };
-        let profile = match lookup("MARIAN_MLX_METAL_PROFILE")
+        let profile = match setting("METAL_PROFILE", &mut lookup)?
             .unwrap_or_else(|| "auto".into())
             .as_str()
         {
@@ -97,7 +97,7 @@ impl MetalConfig {
                 ));
             }
         };
-        let attention = match lookup("MARIAN_MLX_METAL_ATTENTION")
+        let attention = match setting("METAL_ATTENTION", &mut lookup)?
             .unwrap_or_else(|| "auto".into())
             .as_str()
         {
@@ -110,34 +110,31 @@ impl MetalConfig {
                 ));
             }
         };
-        let flash_threshold =
-            positive_value("MARIAN_MLX_METAL_FLASH_THRESHOLD", &mut lookup)?.unwrap_or(1);
+        let flash_threshold = positive_value("METAL_FLASH_THRESHOLD", &mut lookup)?.unwrap_or(1);
         if flash_threshold > MAXIMUM_POSITION {
             return Err(format!(
                 "MARIAN_MLX_METAL_FLASH_THRESHOLD must be between 1 and {MAXIMUM_POSITION}"
             ));
         }
-        let flash_query_tile = positive_value("MARIAN_MLX_METAL_FLASH_QUERY_TILE", &mut lookup)?;
+        let flash_query_tile = positive_value("METAL_FLASH_QUERY_TILE", &mut lookup)?;
         if flash_query_tile.is_some_and(|tile| !matches!(tile, 1 | 2 | 4)) {
             return Err("MARIAN_MLX_METAL_FLASH_QUERY_TILE must be one of 1, 2, or 4".into());
         }
-        let duplicate_batch_width =
-            positive_value("MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH", &mut lookup)?;
-        let decode_row_budget = positive_value("MARIAN_MLX_METAL_DECODE_ROW_BUDGET", &mut lookup)?;
-        let decode_maximum_steps =
-            positive_value("MARIAN_MLX_METAL_DECODE_MAX_STEPS", &mut lookup)?;
+        let duplicate_batch_width = positive_value("METAL_DUPLICATE_BATCH_WIDTH", &mut lookup)?;
+        let decode_row_budget = positive_value("METAL_DECODE_ROW_BUDGET", &mut lookup)?;
+        let decode_maximum_steps = positive_value("METAL_DECODE_MAX_STEPS", &mut lookup)?;
         if decode_maximum_steps.is_some_and(|steps| steps > 8) {
             return Err("MARIAN_MLX_METAL_DECODE_MAX_STEPS must be between 1 and 8".into());
         }
         let decode_selection_threads =
-            positive_value("MARIAN_MLX_METAL_DECODE_SELECTION_THREADS", &mut lookup)?;
+            positive_value("METAL_DECODE_SELECTION_THREADS", &mut lookup)?;
         if decode_selection_threads.is_some_and(|threads| !matches!(threads, 128 | 256 | 512)) {
             return Err(
                 "MARIAN_MLX_METAL_DECODE_SELECTION_THREADS must be 128, 256, or 512".into(),
             );
         }
         let custom_gemm_maximum_rows =
-            non_negative_value("MARIAN_MLX_METAL_CUSTOM_GEMM_MAX_ROWS", &mut lookup)?;
+            non_negative_value("METAL_CUSTOM_GEMM_MAX_ROWS", &mut lookup)?;
         Ok(Self {
             precision,
             profile,
@@ -154,12 +151,13 @@ impl MetalConfig {
 }
 
 fn positive_value(
-    name: &str,
+    suffix: &str,
     lookup: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<Option<usize>, String> {
-    let Some(value) = lookup(name) else {
+    let Some(value) = setting(suffix, lookup)? else {
         return Ok(None);
     };
+    let name = format!("MARIAN_MLX_{suffix}");
     let parsed = value
         .parse::<usize>()
         .map_err(|_| format!("{name} {value:?} is not an integer"))?;
@@ -170,16 +168,34 @@ fn positive_value(
 }
 
 fn non_negative_value(
-    name: &str,
+    suffix: &str,
     lookup: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<Option<usize>, String> {
-    let Some(value) = lookup(name) else {
+    let Some(value) = setting(suffix, lookup)? else {
         return Ok(None);
     };
+    let name = format!("MARIAN_MLX_{suffix}");
     value
         .parse::<usize>()
         .map(Some)
         .map_err(|_| format!("{name} {value:?} is not a non-negative integer"))
+}
+
+fn setting(
+    suffix: &str,
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<Option<String>, String> {
+    let primary_name = format!("MARIAN_MLX_{suffix}");
+    let alias_name = format!("MARIAN_EDGE_{suffix}");
+    let primary = lookup(&primary_name);
+    let alias = lookup(&alias_name);
+    match (primary, alias) {
+        (Some(primary), Some(alias)) if primary != alias => Err(format!(
+            "conflicting settings: {primary_name}={primary:?} and {alias_name}={alias:?}"
+        )),
+        (Some(primary), _) => Ok(Some(primary)),
+        (None, alias) => Ok(alias),
+    }
 }
 
 #[cfg(test)]
@@ -234,5 +250,25 @@ mod tests {
         })
         .expect_err("invalid thread count must fail");
         assert!(error.contains("MARIAN_MLX_METAL_DECODE_SELECTION_THREADS"));
+    }
+
+    #[test]
+    fn edge_alias_is_supported_but_conflicting_values_fail() {
+        let alias = HashMap::from([
+            ("MARIAN_EDGE_METAL_PRECISION", "mixed-f16"),
+            ("MARIAN_EDGE_METAL_PROFILE", "m1"),
+        ]);
+        let config = MetalConfig::from_lookup(|name| alias.get(name).map(ToString::to_string))
+            .expect("edge-prefixed alias must remain supported");
+        assert_eq!(config.precision, MetalPrecision::MixedF16);
+        assert_eq!(config.profile, MetalProfile::M1);
+
+        let conflict = HashMap::from([
+            ("MARIAN_EDGE_METAL_PROFILE", "m1"),
+            ("MARIAN_MLX_METAL_PROFILE", "m2"),
+        ]);
+        let error = MetalConfig::from_lookup(|name| conflict.get(name).map(ToString::to_string))
+            .expect_err("conflicting prefixes must not choose silently");
+        assert!(error.contains("conflicting settings"));
     }
 }

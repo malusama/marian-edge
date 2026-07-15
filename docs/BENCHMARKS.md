@@ -60,7 +60,8 @@ kernel, manifest, and test changes while excluding later documentation-only
 edits:
 
 ```sh
-git diff --binary 3a6c2d9240eaaa2a56135a61b7e7d721de061e36 -- crates \
+git diff --binary 3a6c2d9240eaaa2a56135a61b7e7d721de061e36 \
+  v0.6.0 -- crates \
   | shasum -a 256
 ```
 
@@ -291,6 +292,11 @@ The old peak varied between runs. Its concurrency recommendation must not be
 carried over to the direct Metal backend without a new sweep.
 
 ## Current Q8 CPU qualification and allocation result
+
+This section records historical engineering measurements. The exact five-item
+golden expectations remain in tests, but the raw 200-item per-output comparison
+and allocation-run logs are not checked-in artifacts. Treat the figures below
+as provenance-bound evidence, not as a currently reproducible release gate.
 
 The pure-Rust Q8 graph passes all five release golden translations exactly. In
 a 200-item differential corpus against the retired CPU reference, 164 outputs

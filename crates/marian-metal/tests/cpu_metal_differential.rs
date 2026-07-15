@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use marian_core::{TranslationBackend, TranslationInput};
 use marian_cpu::CpuBackend;
-use marian_mlx::MetalBackend;
+use marian_metal::MetalBackend;
 
 const PRODUCTION_BATCH_SIZE: usize = 16;
 
@@ -123,10 +123,10 @@ fn cpu_fp32_matches_direct_metal_for_deterministic_corpus() {
     let model_dir = model_dir();
     let mut cpu = CpuBackend::load(&model_dir).unwrap();
     let mut metal = MetalBackend::load(&model_dir).unwrap();
+    let mixed_f16 = metal.info().precision == "mixed-f16";
 
     let cpu_batch = translate_production_batches(&mut cpu, &inputs);
     let metal_batch = translate_production_batches(&mut metal, &inputs);
-    let mixed_f16 = std::env::var("MARIAN_MLX_METAL_PRECISION").as_deref() == Ok("mixed-f16");
     assert_eq!(cpu_batch.len(), corpus.len());
     assert_eq!(metal_batch.len(), corpus.len());
     let mut mismatches = Vec::new();

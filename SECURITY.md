@@ -18,10 +18,13 @@ impact. We aim to acknowledge reports within seven days.
 
 ## Deployment boundary
 
-The default listener is loopback-only. The service has no authentication,
-authorization, TLS termination, tenant isolation, or abuse controls. Do not
-bind it to a public or untrusted network. Put an authenticated reverse proxy
-and request limits in front of it if remote access is required.
+The native server defaults to a loopback-only listener. The container listens
+on `0.0.0.0:3000` inside its network namespace, while the supported Compose
+file publishes that port only on host `127.0.0.1`. The service has no
+authentication, authorization, TLS termination, tenant isolation, or abuse
+controls. Do not bind or publish it to a public or untrusted network. Put an
+authenticated reverse proxy and request limits in front of it if remote access
+is required.
 
 Text is processed locally and is not intentionally logged, but operators are
 responsible for host, proxy, and container logging policies.

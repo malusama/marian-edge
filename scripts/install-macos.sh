@@ -145,7 +145,7 @@ fi
 
 AVAILABLE_KB=$(df -Pk "$HOME" | awk 'NR==2 {print $4}')
 if [ "${AVAILABLE_KB:-0}" -lt 750000 ]; then
-  fail "at least 750 MB of free disk space is required for first install"
+  fail "at least 750 MB of free disk space is required to run the installer"
 fi
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/marian-mlx-install.XXXXXX")
@@ -397,7 +397,7 @@ fi
 
 model_is_valid() {
   [ -f "$BASE/models/en-zh/manifest.json" ] && \
-  grep -Eq '"format"[[:space:]]*:[[:space:]]*"marian-mlx\.transformer-ssru\.v1"' \
+  grep -Eq '"format"[[:space:]]*:[[:space:]]*"(marian-edge|marian-mlx)\.transformer-ssru\.v1"' \
     "$BASE/models/en-zh/manifest.json" && \
   [ -f "$BASE/models/en-zh/model.fp32.safetensors" ] && \
   [ -f "$BASE/models/en-zh/source.spm" ] && \

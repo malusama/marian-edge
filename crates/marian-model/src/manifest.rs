@@ -8,6 +8,33 @@ use marian_core::BackendError;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+pub const MODEL_FORMAT_V1: &str = "marian-edge.transformer-ssru.v1";
+pub const LEGACY_MODEL_FORMAT_V1: &str = "marian-mlx.transformer-ssru.v1";
+pub const MAXIMUM_POSITION: usize = 4_096;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransformerSsruSpec {
+    pub model_dim: usize,
+    pub attention_heads: usize,
+    pub encoder_layers: usize,
+    pub decoder_layers: usize,
+    pub ffn_dim: usize,
+    pub eos_id: i32,
+    pub unk_id: i32,
+    pub maximum_length_factor: usize,
+}
+
+pub const SUPPORTED_TRANSFORMER_SSRU: TransformerSsruSpec = TransformerSsruSpec {
+    model_dim: 384,
+    attention_heads: 8,
+    encoder_layers: 6,
+    decoder_layers: 4,
+    ffn_dim: 1_536,
+    eos_id: 0,
+    unk_id: 1,
+    maximum_length_factor: 8,
+};
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelManifest {
     pub format: String,
@@ -36,6 +63,50 @@ pub struct Architecture {
     pub eos_id: i32,
     pub unk_id: i32,
     pub max_length_factor: usize,
+}
+
+impl Architecture {
+    pub fn validate_supported(&self) -> Result<(), String> {
+        let supported = SUPPORTED_TRANSFORMER_SSRU;
+        if (
+            self.model_dim,
+            self.attention_heads,
+            self.encoder_layers,
+            self.decoder_layers,
+            self.ffn_dim,
+            self.eos_id,
+            self.unk_id,
+        ) != (
+            supported.model_dim,
+            supported.attention_heads,
+            supported.encoder_layers,
+            supported.decoder_layers,
+            supported.ffn_dim,
+            supported.eos_id,
+            supported.unk_id,
+        ) {
+            return Err(format!(
+                "supported Transformer-SSRU graph is {}d/{}h/{}e/{}d/{}ffn with EOS={} and UNK={}",
+                supported.model_dim,
+                supported.attention_heads,
+                supported.encoder_layers,
+                supported.decoder_layers,
+                supported.ffn_dim,
+                supported.eos_id,
+                supported.unk_id,
+            ));
+        }
+        if self.source_vocab_size <= 2 || self.target_vocab_size <= 2 {
+            return Err("model vocabulary sizes must contain EOS, UNK, and warmup tokens".into());
+        }
+        if !(1..=supported.maximum_length_factor).contains(&self.max_length_factor) {
+            return Err(format!(
+                "model max_length_factor must be between 1 and {}",
+                supported.maximum_length_factor
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,7 +161,10 @@ impl ModelManifest {
     }
 
     fn validate(&self) -> Result<(), BackendError> {
-        if self.format != "marian-mlx.transformer-ssru.v1" {
+        if !matches!(
+            self.format.as_str(),
+            MODEL_FORMAT_V1 | LEGACY_MODEL_FORMAT_V1
+        ) {
             return Err(BackendError::Model(format!(
                 "unsupported model format {}",
                 self.format
@@ -102,24 +176,9 @@ impl ModelManifest {
                 self.precision
             )));
         }
-        let architecture = &self.architecture;
-        if (
-            architecture.model_dim,
-            architecture.attention_heads,
-            architecture.encoder_layers,
-            architecture.decoder_layers,
-            architecture.ffn_dim,
-        ) != (384, 8, 6, 4, 1536)
-            || architecture.eos_id != 0
-            || architecture.unk_id != 1
-            || architecture.source_vocab_size <= 2
-            || architecture.target_vocab_size <= 2
-            || !(1..=8).contains(&architecture.max_length_factor)
-        {
-            return Err(BackendError::Model(
-                "this release supports the 384d/6e/4d SSRU graph only".into(),
-            ));
-        }
+        self.architecture
+            .validate_supported()
+            .map_err(BackendError::Model)?;
         Ok(())
     }
 }
@@ -164,7 +223,7 @@ mod tests {
 
     fn manifest(precision: &str, max_length_factor: usize) -> ModelManifest {
         ModelManifest {
-            format: "marian-mlx.transformer-ssru.v1".into(),
+            format: MODEL_FORMAT_V1.into(),
             model_id: "test".into(),
             source_lang: "en".into(),
             target_lang: "zh".into(),
@@ -202,6 +261,13 @@ mod tests {
         assert!(manifest("fp16", 3).validate().is_err());
         assert!(manifest("fp32", 0).validate().is_err());
         assert!(manifest("fp32", 9).validate().is_err());
+    }
+
+    #[test]
+    fn legacy_model_format_remains_loadable_during_rename() {
+        let mut value = manifest("fp32", 3);
+        value.format = LEGACY_MODEL_FORMAT_V1.into();
+        assert!(value.validate().is_ok());
     }
 
     #[test]

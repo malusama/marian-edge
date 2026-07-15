@@ -20,9 +20,9 @@ jobs:
         run: make check
       - name: Native Metal unit gates
         run: |
-          cargo clippy --locked -p marian-mlx --all-targets --features metal -- -D warnings
+          cargo clippy --locked -p marian-metal --all-targets --features metal -- -D warnings
           cargo clippy --locked -p marian-server --all-targets --features metal -- -D warnings
-          cargo test --locked -p marian-mlx --features metal --lib
+          cargo test --locked -p marian-metal --features metal --lib
           python3 tools/test_summarize_metal_trace.py
       - name: Check tag version
         run: |

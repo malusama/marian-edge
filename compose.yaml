@@ -1,10 +1,10 @@
 services:
   marian-mlx:
-    image: ghcr.io/malusama/marian-mlx:cpu
+    image: "${MARIAN_MLX_IMAGE:-ghcr.io/malusama/marian-mlx:cpu}"
     build:
       context: .
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${MARIAN_MLX_HOST_PORT:-3000}:3000"
     environment:
       MARIAN_MLX_CPU_THREADS: "${MARIAN_MLX_CPU_THREADS:-1}"
     volumes:

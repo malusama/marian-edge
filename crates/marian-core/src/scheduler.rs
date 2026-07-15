@@ -608,10 +608,32 @@ mod tests {
         inferred_inputs: Arc<AtomicUsize>,
     }
 
+    struct PanickingBackend;
+
     type RepetitionRecord = Vec<(Vec<String>, Vec<usize>)>;
 
     struct RepetitionBackend {
         records: Arc<Mutex<RepetitionRecord>>,
+    }
+
+    impl TranslationBackend for PanickingBackend {
+        fn info(&self) -> BackendInfo {
+            BackendInfo {
+                name: "panic-test".into(),
+                device: "none".into(),
+                model: "test".into(),
+                precision: "n/a".into(),
+                attention: None,
+                supports_batching: true,
+            }
+        }
+
+        fn translate_batch(
+            &mut self,
+            _inputs: &[TranslationInput],
+        ) -> Result<Vec<TranslationOutput>, BackendError> {
+            panic!("intentional backend panic")
+        }
     }
 
     impl TranslationBackend for RepetitionBackend {
@@ -881,10 +903,21 @@ mod tests {
             assert_eq!(task.await.unwrap().text, expected);
         }
 
-        assert_eq!(
-            records.lock().unwrap().as_slice(),
-            &[(vec!["a".into(), "b".into(), "c".into()], vec![3, 2, 3])]
-        );
+        {
+            let records = records.lock().unwrap();
+            assert_eq!(records.len(), 1);
+            let mut repetitions = records[0]
+                .0
+                .iter()
+                .cloned()
+                .zip(records[0].1.iter().copied())
+                .collect::<Vec<_>>();
+            repetitions.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            assert_eq!(
+                repetitions,
+                vec![("a".into(), 3), ("b".into(), 2), ("c".into(), 3)]
+            );
+        }
         translator.shutdown().await;
     }
 
@@ -977,6 +1010,32 @@ mod tests {
         let accepted = translator.stats().snapshot().accepted;
         let second = translator
             .translate(TranslationInput::new("second", "en", "zh"))
+            .await;
+        assert!(matches!(second, Err(TranslateError::WorkerStopped)));
+        assert_eq!(translator.stats().snapshot().accepted, accepted);
+    }
+
+    #[tokio::test]
+    async fn backend_panic_stops_readiness_and_future_admission() {
+        let translator =
+            Translator::start(SchedulerConfig::default(), || Ok(PanickingBackend)).unwrap();
+
+        let first = translator
+            .translate(TranslationInput::new("panic", "en", "zh"))
+            .await;
+        assert!(matches!(first, Err(TranslateError::WorkerStopped)));
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while translator.is_ready() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let accepted = translator.stats().snapshot().accepted;
+        let second = translator
+            .translate(TranslationInput::new("after-panic", "en", "zh"))
             .await;
         assert!(matches!(second, Err(TranslateError::WorkerStopped)));
         assert_eq!(translator.stats().snapshot().accepted, accepted);

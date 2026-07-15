@@ -3,18 +3,17 @@ use std::{collections::HashMap, fs, path::Path};
 use memmap2::MmapOptions;
 use safetensors::{Dtype, SafeTensors, tensor::TensorView};
 
-use marian_model::{Architecture, LexicalShortlist};
+use marian_model::{Architecture, LexicalShortlist, MAXIMUM_POSITION, sinusoidal_positions};
 
+use crate::limits::{
+    MAXIMUM_ENGINE_BATCH, MAXIMUM_GENERATION_STEPS, MAXIMUM_PADDED_ATTENTION_CELLS,
+    MAXIMUM_SOURCE_TOKENS as MAXIMUM_SOURCE_LENGTH,
+};
 use crate::tensor::{
     Matrix, attention, matmul, relu_in_place, residual_layer_norm, select_token,
     ssru_update_layer_norm,
 };
 
-const MAXIMUM_POSITION: usize = 4_096;
-const MAXIMUM_BATCH: usize = 256;
-const MAXIMUM_SOURCE_LENGTH: usize = 256;
-const MAXIMUM_GENERATION_STEPS: usize = 256;
-const MAXIMUM_PADDED_ATTENTION_CELLS: usize = 65_536;
 const MAXIMUM_WEIGHT_FILE_BYTES: u64 = 256 * 1_024 * 1_024;
 const EMBEDDING_SCALE: f32 = 19.595_919;
 
@@ -107,7 +106,7 @@ impl CpuEngine {
         shortlist_path: Option<&Path>,
         architecture: &Architecture,
     ) -> Result<Self, String> {
-        validate_architecture(architecture)?;
+        architecture.validate_supported()?;
         let model = ModelWeights::load(weights_path.as_ref(), architecture)?;
         let shortlist = LexicalShortlist::load(
             shortlist_path,
@@ -116,7 +115,7 @@ impl CpuEngine {
         )?;
         Ok(Self {
             model,
-            positions: make_positions(architecture.model_dim),
+            positions: sinusoidal_positions(architecture.model_dim)?,
             shortlist,
             dim: architecture.model_dim,
             heads: architecture.attention_heads,
@@ -273,9 +272,9 @@ impl CpuEngine {
             return Err("invalid packed batch offsets".into());
         }
         let batch = offsets.len() - 1;
-        if batch > MAXIMUM_BATCH {
+        if batch > MAXIMUM_ENGINE_BATCH {
             return Err(format!(
-                "batch contains {batch} sentences; maximum is {MAXIMUM_BATCH}"
+                "batch contains {batch} sentences; maximum is {MAXIMUM_ENGINE_BATCH}"
             ));
         }
         if max_output_tokens.len() != batch {
@@ -697,55 +696,9 @@ fn decode_f32(bytes: &[u8], name: &str) -> Result<Vec<f32>, String> {
         .collect()
 }
 
-fn make_positions(dim: usize) -> Vec<f32> {
-    let half = dim / 2;
-    let mut values = vec![0.0_f32; MAXIMUM_POSITION * dim];
-    for position in 0..MAXIMUM_POSITION {
-        for index in 0..half {
-            let frequency = (-(index as f32) * 10_000.0_f32.ln() / (half - 1) as f32).exp();
-            values[position * dim + index] = (position as f32 * frequency).sin();
-            values[position * dim + half + index] = (position as f32 * frequency).cos();
-        }
-    }
-    values
-}
-
-fn validate_architecture(architecture: &Architecture) -> Result<(), String> {
-    if (
-        architecture.model_dim,
-        architecture.attention_heads,
-        architecture.encoder_layers,
-        architecture.decoder_layers,
-        architecture.ffn_dim,
-    ) != (384, 8, 6, 4, 1536)
-        || architecture.eos_id != 0
-        || architecture.unk_id != 1
-    {
-        return Err("pure Rust CPU v1 supports the 384d/6e/4d SSRU graph only".into());
-    }
-    if architecture.source_vocab_size <= 2 || architecture.target_vocab_size <= 2 {
-        return Err("model vocabulary sizes must contain EOS, UNK, and warmup tokens".into());
-    }
-    if !(1..=8).contains(&architecture.max_length_factor) {
-        return Err("model max_length_factor must be between 1 and 8".into());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{make_positions, validate_work_shape};
-
-    #[test]
-    fn sinusoidal_positions_are_grouped_sin_then_cos() {
-        let positions = make_positions(384);
-        assert_eq!(positions[0], 0.0);
-        assert_eq!(positions[191], 0.0);
-        assert_eq!(positions[192], 1.0);
-        assert_eq!(positions[383], 1.0);
-        assert!((positions[384] - 1.0_f32.sin()).abs() < 1.0e-7);
-        assert!((positions[384 + 192] - 1.0_f32.cos()).abs() < 1.0e-7);
-    }
+    use super::validate_work_shape;
 
     #[test]
     fn padded_attention_work_is_bounded() {

@@ -1,8 +1,9 @@
 use std::fmt;
 
+use marian_model::MAXIMUM_POSITION;
+
 use crate::{MetalAttention, MetalConfig, MetalProfile};
 
-const MAXIMUM_POSITION: usize = 4_096;
 const FLASH_ATTENTION_MAX_HEAD_DIM: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

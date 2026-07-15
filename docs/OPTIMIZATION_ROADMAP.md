@@ -6,11 +6,12 @@ Code completion and measured performance are deliberately different states.
 
 ## Qualified release: v0.6.0
 
-The final direct-Metal runtime was compared live with freshly built v0.1.0 and
-v0.5.0 binaries on the documented Apple M1 / 16 GB host. Under visible desktop
-load, paired three-run medians were:
+The final v0.6.0 release candidate was compared live with freshly built v0.1.0
+and v0.5.0 binaries on the documented Apple M1 / 16 GB host. The candidate's
+version field still reported 0.5.0; the v0.6.0 release uses the same inference
+source. Under visible desktop load, paired three-run medians were:
 
-| FP32 workload | v0.1.0 | v0.5.0 live | v0.6.0 | v0.6 vs v0.1 |
+| FP32 workload | v0.1.0 | v0.5.0 live | v0.6 candidate | v0.6 vs v0.1 |
 |---|---:|---:|---:|---:|
 | 1,000 repeated short requests | 486.64 item/s | 496.14 item/s | 546.19 item/s | +12.2% |
 | 5 x 200 distinct corpus items | 116.68 item/s | 126.37 item/s | 149.14 item/s | +27.8% |

@@ -1,6 +1,6 @@
 use std::{cell::Cell, path::Path};
 
-use marian_model::{Architecture, LexicalShortlist};
+use marian_model::{Architecture, LexicalShortlist, MAXIMUM_POSITION, sinusoidal_positions};
 
 use crate::MetalConfig;
 use crate::metal_runtime::{Buffer, Commands, MetalRuntime, MetalStorage};
@@ -12,10 +12,9 @@ mod model;
 mod ops;
 
 pub(crate) use decode::BatchOutput;
-use model::{EncoderLayer, FeedForwardWeights, ModelWeights, make_positions};
+use model::{EncoderLayer, FeedForwardWeights, ModelWeights};
 use ops::AttentionView;
 
-const MAXIMUM_POSITION: usize = 4_096;
 const MAXIMUM_BATCH: usize = 256;
 
 struct CrossCache {
@@ -58,7 +57,7 @@ impl MetalEngine {
         runtime.validate_execution_plan(tuning.decode.selection_threads())?;
         let storage = runtime.storage();
         let model = ModelWeights::load(&runtime, weights_path, architecture)?;
-        let positions = runtime.upload(&make_positions(architecture.model_dim))?;
+        let positions = runtime.upload(&sinusoidal_positions(architecture.model_dim)?)?;
         let shortlist = LexicalShortlist::load(
             shortlist_path,
             architecture.source_vocab_size,

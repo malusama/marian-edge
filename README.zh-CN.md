@@ -41,7 +41,8 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 安装器不需要 root，会校验 Release 和所有模型文件；模型由用户机器直接从
 Mozilla 存储下载并在本机转换，然后安装用户级 LaunchAgent，默认监听
-`127.0.0.1:3000`。首次安装需要约 750 MB 可用空间。`v0.1.1` 仍作为最后一个
+`127.0.0.1:3000`。安装器每次运行都要求至少 750 MB 可用空间；首次安装会使用
+其中大部分空间，并因下载和本地转换模型耗时更久。`v0.1.1` 仍作为最后一个
 历史 MLX/Bergamot 版本保留，但其 runtime 布局不兼容 `v0.2.0` 的 direct Metal
 bundle 契约；需要在两种布局间回滚时请使用 `v0.2.1` 或更高版本。
 
@@ -50,13 +51,29 @@ bundle 契约；需要在两种布局间回滚时请使用 `v0.2.1` 或更高版
 ~/.local/bin/marian-mlxctl verify
 ~/.local/bin/marian-mlxctl logs
 ~/.local/bin/marian-mlxctl restart
+~/.local/bin/marian-mlxctl stop
+~/.local/bin/marian-mlxctl start
 ~/.local/bin/marian-mlxctl update
+~/.local/bin/marian-mlxctl rollback
 ~/.local/bin/marian-mlxctl uninstall          # 保留模型与缓存
 ~/.local/bin/marian-mlxctl uninstall --purge  # 全部删除
 ```
 
-用 `MARIAN_MLX_PORT=3100` 可改端口。安装器不会抢占无关进程的端口；新版本
-未通过 `/readyz` 时会自动回滚。
+改用 3100 时，要在管道接收端设置端口，之后所有接口（包括沉浸式翻译）都使用
+同一个端口：
+
+```sh
+PORT=3100
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.6.0 MARIAN_MLX_PORT="$PORT" sh
+curl -fsS "http://127.0.0.1:$PORT/readyz"
+curl -fsS "http://127.0.0.1:$PORT/info"
+# 沉浸式翻译地址：http://127.0.0.1:3100/imme
+```
+
+后续升级会保留已保存的端口。安装器不会抢占无关进程的端口；新版本未通过
+`/readyz` 时会自动回滚。
 
 ## Docker CPU 一键启动
 
@@ -69,12 +86,24 @@ docker compose ps
 curl -fsS http://127.0.0.1:3000/info
 ```
 
+Compose 内部服务始终使用 3000。若宿主机要发布到 3100，只修改 host 侧，并在
+所有客户端地址中使用 3100：
+
+```sh
+MARIAN_MLX_HOST_PORT=3100 docker compose up -d
+curl -fsS http://127.0.0.1:3100/readyz
+curl -fsS http://127.0.0.1:3100/info
+# 沉浸式翻译地址：http://127.0.0.1:3100/imme
+```
+
 也可以直接运行：
 
 ```sh
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
+  --read-only --tmpfs /tmp:size=64m,mode=1777 \
+  --cap-drop ALL --security-opt no-new-privileges \
   ghcr.io/malusama/marian-mlx:cpu-0.6.0
 ```
 
@@ -101,8 +130,13 @@ MARIAN_MLX_CPU_THREADS=2 docker compose up -d --force-recreate
 4. API 地址填写 `http://127.0.0.1:3000/imme`。
 5. 源语言选择英语，目标语言选择简体中文。
 
-服务默认不开放 CORS。扩展具备 localhost 权限时通常不需要；如果扩展明确报告
-CORS 错误，可在只绑定本机的前提下重新运行固定版本安装器：
+以上地址使用默认端口。如果原生安装器或 Compose 改成宿主机 3100，应先检查
+`http://127.0.0.1:3100/readyz`，并在扩展里填写
+`http://127.0.0.1:3100/imme`；健康检查和扩展地址不能混用两个端口。
+
+服务默认不开放 CORS。扩展具备 loopback 访问权限时通常不需要；如果扩展明确
+报告 CORS 错误，优先配置扩展的精确可信 origin。`*` 只适合仍绑定本机的个人
+部署：
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
@@ -132,13 +166,24 @@ curl -fsS http://127.0.0.1:3000/translate \
 | `POST /imme` | 沉浸式翻译兼容批量格式 |
 | `POST /detect` | 简单的英语/CJK 启发式检测，不是通用语种识别 |
 | `GET /livez` | 进程与事件循环存活 |
-| `GET /readyz` | 模型已加载且调度器可接收请求 |
+| `GET /readyz` | 模型 worker 生命周期已就绪；不表示队列仍有空位 |
 | `GET /health` | 旧客户端兼容接口 |
 | `GET /info` | 版本、提交、后端、设备、精度、attention 模式、模型、运行时间 |
 | `GET /metrics` | Prometheus 指标 |
 
 `en-US`、`en_US`、`zh-CN`、`zh-Hans` 会归一化为 `en` 和 `zh`。当前版本只
-支持英译中。`max_output_tokens` 可用于 direct Metal 和纯 Rust CPU 后端。
+支持英译中。
+
+| 接口 | 接受的 JSON 字段 | 限制 |
+|---|---|---|
+| `POST /translate` | `text`、可选 `from`、必填 `to`、可选 `max_output_tokens`；`source_lang`、`target_lang` 分别是 `from`、`to` 的别名 | `max_output_tokens` 默认 512，并收敛到 1-2,048 |
+| `POST /imme` | 可选 `source_lang`、必填 `target_lang`、必填 `text_list` | 最多 256 个非空项目；协议未定义 `max_output_tokens`，每项使用默认 512 token 预算 |
+| `POST /detect` | 必填 `text`；返回 `{"language":"en"}` 或 `{"language":"zh"}` | 仅提供英语/CJK 启发式检测 |
+
+两套请求字段不要混用。完整 JSON 请求体（包括 JSON 结构和所有列表项目）最大
+64 KiB，每个文本项也必须非空。通过 `/translate` 使用时，direct Metal 和纯
+Rust CPU 都支持 `max_output_tokens`；它是调用方上限，EOS 与后端模型/runtime
+上限可能让生成更早结束。
 
 ## 当前支持范围
 
@@ -162,14 +207,15 @@ curl -fsS http://127.0.0.1:3000/translate \
 文本分段策略，并由各自 tokenizer 提供精确 piece 计数：CPU 每段最多 255 个源
 piece 加 EOS，Metal 每段最多 4095 个源 piece 加 EOS。更长的文本会优先在
 tokenizer 感知的句子边界分段，之后按原顺序拼回并保留包括换行在内的分隔符；
-自动分段不会重置该输入的 `max_output_tokens` 总预算。HTTP 文本大小另受 64 KiB
-请求契约限制。CPU 还会约束 batch 的 padding attention 工作量，因为 encoder
-attention 是平方复杂度。
+自动分段不会重置该输入的 `max_output_tokens` 总预算。完整 HTTP JSON 请求体另
+受 64 KiB 限制。CPU 还会约束 batch 的 padding attention 工作量，因为
+encoder attention 是平方复杂度；融合 Metal attention 不生成平方大小的 score
+矩阵。
 
 Q8 后端对 5 条 release golden 全部精确一致。在 200 条差分语料中，与已退役
 CPU 参考实现有 164 条输出精确一致；其余多为接近分数下的 token 选择差异，
-因此这里不声称逐 token 完全等价。测试中的 80 句重复长文本与换行样例和已
-退役长文本基线一致。
+因此这里不声称逐 token 完全等价。这组 164/200 比较和 80 句重复长文本、换行
+测试属于历史工程证据，原始结果 artifact 当前未提交到仓库。
 
 ## 并发模型
 
@@ -247,10 +293,13 @@ MARIAN_MLX_METAL_FLASH_THRESHOLD=1 \
 ```
 
 这台 Apple M1 / 16 GB 机器的吞吐甜点是
-`--max-batch-size 16 --batch-window-us 750`，短请求并发约 32。并发增加到 64
-几乎不再提高吞吐，但 p50 大约翻倍。M1 已验证的重复行宽度默认为 9，可用
+`--max-batch-size 16 --batch-window-us 750`，v0.6 资格测试覆盖的短请求并发约
+32。历史 v0.4 mixed-f16 扫描显示并发 64 不再增加吞吐且中位延迟明显上升；这
+只是容量预警，不是当前 v0.6 FP32 的 64 并发证明。M1 已验证的重复行宽度默认
+为 9，可用
 `MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH` 覆盖；它只在当前动态 batch 内补足
-Metal 物理占位，不会跨 batch 缓存结果。当前 M1 profile 的重复行宽度、decode
+最多这么多 Metal 物理占位；逻辑重复项始终由 core 合并，也不会跨 batch 缓存
+结果。当前 M1 profile 的重复行宽度、decode
 row budget、单次提交步数和选词线程数分别是 9、54、6、256，自定义 FP32 GEMM
 保持关闭；`/info` 会报告完整解析结果。M2、M3、M4 和 generic profile 目前只是
 保守起点，必须在对应硬件复测后才能称为甜点。需要严格输出契约时用默认 FP32；
@@ -269,8 +318,10 @@ framework 编译，因此不再需要 `libmlx.dylib`、外置 `.metallib`、MLX 
 
 ## 性能
 
-v0.6.0 与现场重新构建的 v0.1.0 MLX 在同一台有桌面负载的 M1 上做了三轮中位数
-A/B：1,000 个短请求从 486.64 提升到 546.19 item/s（+12.2%），5 次 200 条不同
+最终 v0.6.0 release candidate 与现场重新构建的 v0.1.0 MLX 在同一台有桌面负载
+的 M1 上做了三轮中位数 A/B。实测 candidate 因版本提交尚未完成而报告 0.5.0，
+正式 v0.6.0 使用相同推理源码：1,000 个短请求从 486.64 提升到 546.19 item/s
+（+12.2%），5 次 200 条不同
 语料从 116.68 提升到 149.14 item/s（+27.8%）。最终二进制的 Flash q4 又分别比
 classic attention 快 12.3% 和 4.9%，输出 hash 一致。Metal FP32 与 CPU FP32 在
 200/200 条确定性语料上精确一致；300 请求 trace 中 40/40 个有标签 command

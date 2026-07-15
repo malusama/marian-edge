@@ -5,7 +5,7 @@ use safetensors::{Dtype, SafeTensors, tensor::TensorView as SafeTensorView};
 
 use marian_model::Architecture;
 
-use super::{MAXIMUM_POSITION, checked_product};
+use super::checked_product;
 use crate::metal_runtime::{Buffer, MetalRuntime};
 
 pub(super) struct AttentionOutputWeights {
@@ -333,33 +333,4 @@ fn take_packed_columns(
         }
     }
     runtime.upload_model_f32(&packed)
-}
-
-pub(super) fn make_positions(dim: usize) -> Vec<f32> {
-    let half = dim / 2;
-    let mut values = vec![0.0_f32; MAXIMUM_POSITION * dim];
-    for position in 0..MAXIMUM_POSITION {
-        for index in 0..half {
-            let frequency = (-(index as f32) * 10_000.0_f32.ln() / (half - 1) as f32).exp();
-            values[position * dim + index] = (position as f32 * frequency).sin();
-            values[position * dim + half + index] = (position as f32 * frequency).cos();
-        }
-    }
-    values
-}
-
-#[cfg(test)]
-mod tests {
-    use super::make_positions;
-
-    #[test]
-    fn sinusoidal_positions_are_grouped_sin_then_cos() {
-        let positions = make_positions(384);
-        assert_eq!(positions[0], 0.0);
-        assert_eq!(positions[191], 0.0);
-        assert_eq!(positions[192], 1.0);
-        assert_eq!(positions[383], 1.0);
-        assert!((positions[384] - 1.0_f32.sin()).abs() < 1.0e-7);
-        assert!((positions[384 + 192] - 1.0_f32.cos()).abs() < 1.0e-7);
-    }
 }

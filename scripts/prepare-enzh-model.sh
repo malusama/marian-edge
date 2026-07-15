@@ -73,7 +73,7 @@ verify 8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681 "$CACHE/
   echo "converted FP32 weights are missing" >&2
   exit 1
 }
-grep -Eq '"format"[[:space:]]*:[[:space:]]*"marian-mlx\.transformer-ssru\.v1"' \
+grep -Eq '"format"[[:space:]]*:[[:space:]]*"marian-edge\.transformer-ssru\.v1"' \
   "$STAGING/manifest.json" || {
   echo "converted model manifest is invalid" >&2
   exit 1

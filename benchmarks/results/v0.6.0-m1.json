@@ -120,6 +120,6 @@
     "The desktop was under visible Otty and WindowServer load, so paired live comparisons are authoritative; historical quiet-host peaks remain documented separately.",
     "Peak RSS includes shared-memory and purgeable-page behavior on macOS and is not used as a cross-runtime allocation oracle.",
     "Only package version metadata and documentation changed between the measured candidate binary and the v0.6.0 release source; inference code did not change.",
-    "Reproduce source_diff_sha256 from the v0.6.0 release commit with: git diff --binary 3a6c2d9240eaaa2a56135a61b7e7d721de061e36 -- crates | shasum -a 256"
+    "Reproduce source_diff_sha256 from any checkout with: git diff --binary 3a6c2d9240eaaa2a56135a61b7e7d721de061e36 v0.6.0 -- crates | shasum -a 256"
   ]
 }

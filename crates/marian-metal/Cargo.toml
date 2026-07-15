@@ -1,5 +1,5 @@
 [package]
-name = "marian-mlx"
+name = "marian-metal"
 description = "Apple Silicon direct Metal backend for Marian translation models"
 version.workspace = true
 edition.workspace = true

@@ -36,6 +36,25 @@ fn matches_known_sentences_and_batch_semantics() {
         assert_eq!(&actual.text, expected);
     }
 
+    // Immersive Translate reserves numbered and paired-tag placeholders. This
+    // is a protocol-compatibility regression, separate from the five release
+    // translation goldens above.
+    let placeholder_cases = [
+        ("{0} Hello {1} world.", "{0} Hello {1} 世界。"),
+        (
+            "<b0></b0> Hello <b1></b1> world.",
+            "<b0></b0> Hello <b1></b1> 世界。",
+        ),
+    ];
+    let placeholder_inputs = placeholder_cases
+        .iter()
+        .map(|(source, _)| TranslationInput::new(*source, "en", "zh"))
+        .collect::<Vec<_>>();
+    let placeholder_outputs = backend.translate_batch(&placeholder_inputs).unwrap();
+    for ((_, expected), actual) in placeholder_cases.iter().zip(placeholder_outputs) {
+        assert_eq!(&actual.text, expected);
+    }
+
     let invariant_cases = [
         "Rust is a systems programming language.",
         "Quantum entanglement puzzled Einstein.",

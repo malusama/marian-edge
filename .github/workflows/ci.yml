@@ -21,6 +21,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
+      - name: Documentation and deployment contracts
+        run: |
+          python3 -m py_compile tools/check_docs.py
+          python3 tools/check_docs.py
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -166,7 +170,7 @@ jobs:
         run: cargo check --locked -p marian-server --features metal
       - name: Clippy direct Metal backend
         run: |
-          cargo clippy --locked -p marian-mlx --all-targets --features metal -- -D warnings
+          cargo clippy --locked -p marian-metal --all-targets --features metal -- -D warnings
           cargo clippy --locked -p marian-server --all-targets --features metal -- -D warnings
       - name: Test direct Metal crate
-        run: cargo test --locked -p marian-mlx --features metal
+        run: cargo test --locked -p marian-metal --features metal

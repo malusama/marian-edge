@@ -196,9 +196,9 @@ fn create_translator(
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
 fn start_metal_translator(config: SchedulerConfig, model_dir: PathBuf) -> Result<Translator> {
-    let metal_config = marian_mlx::MetalConfig::from_env().map_err(anyhow::Error::msg)?;
+    let metal_config = marian_metal::MetalConfig::from_env().map_err(anyhow::Error::msg)?;
     Translator::start(config, move || {
-        marian_mlx::MetalBackend::load_with_config(model_dir, &metal_config)
+        marian_metal::MetalBackend::load_with_config(model_dir, &metal_config)
     })
     .map_err(Into::into)
 }

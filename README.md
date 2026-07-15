@@ -53,21 +53,38 @@ runtime layout is not compatible with the direct Metal bundle contract used by
 `v0.2.0` and later. Use `v0.2.1` or newer when rollback across those layouts is
 required.
 
-You can inspect the script before running it. First install needs about 750 MB
-of free space and takes longer because
-the model and a pinned Python conversion environment are prepared locally.
+You can inspect the script before running it. The installer requires at least
+750 MB of free space each time it runs. A first install uses most of that space
+and takes longer because the model and a pinned Python conversion environment
+are prepared locally.
 
 ```sh
 ~/.local/bin/marian-mlxctl status
 ~/.local/bin/marian-mlxctl verify
 ~/.local/bin/marian-mlxctl logs
 ~/.local/bin/marian-mlxctl restart
+~/.local/bin/marian-mlxctl stop
+~/.local/bin/marian-mlxctl start
 ~/.local/bin/marian-mlxctl update
+~/.local/bin/marian-mlxctl rollback
 ~/.local/bin/marian-mlxctl uninstall          # keeps the model/cache
 ~/.local/bin/marian-mlxctl uninstall --purge  # removes everything
 ```
 
-Override the port with `MARIAN_MLX_PORT=3100`. The installer does not take a
+To use port 3100, set it on the receiving side of the install pipe and then use
+that same port for every endpoint, including Immersive Translate:
+
+```sh
+PORT=3100
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.6.0 MARIAN_MLX_PORT="$PORT" sh
+curl -fsS "http://127.0.0.1:$PORT/readyz"
+curl -fsS "http://127.0.0.1:$PORT/info"
+# Immersive Translate URL: http://127.0.0.1:3100/imme
+```
+
+The saved port is retained by later updates. The installer does not take a
 port owned by another process and rolls back if `/readyz` fails.
 
 ## Docker CPU: one command
@@ -81,12 +98,24 @@ docker compose ps
 curl -fsS http://127.0.0.1:3000/info
 ```
 
+Compose keeps the container service on port 3000. To publish it on host port
+3100, change only the host side and use 3100 in every client URL:
+
+```sh
+MARIAN_MLX_HOST_PORT=3100 docker compose up -d
+curl -fsS http://127.0.0.1:3100/readyz
+curl -fsS http://127.0.0.1:3100/info
+# Immersive Translate URL: http://127.0.0.1:3100/imme
+```
+
 Or without Compose:
 
 ```sh
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
+  --read-only --tmpfs /tmp:size=64m,mode=1777 \
+  --cap-drop ALL --security-opt no-new-privileges \
   ghcr.io/malusama/marian-mlx:cpu-0.6.0
 ```
 
@@ -116,10 +145,15 @@ traffic before increasing its internal compute parallelism.
 4. Set the API URL to `http://127.0.0.1:3000/imme`.
 5. Select English as the source and Simplified Chinese as the target.
 
-The service has CORS disabled by default. Browser extensions with localhost
+Those URLs assume the default port. If the native installer or Compose example
+uses host port 3100, first check `http://127.0.0.1:3100/readyz` and enter
+`http://127.0.0.1:3100/imme`; do not mix ports between health checks and the
+extension.
+
+The service has CORS disabled by default. Browser extensions with loopback
 permission normally do not need it. If the extension reports a CORS error,
-re-run the pinned installer with a trusted extension origin. A wildcard is
-available for a loopback-only personal deployment:
+re-run the pinned installer with the extension's exact trusted origin. A
+wildcard is available only for a loopback-only personal deployment:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
@@ -149,15 +183,25 @@ curl -fsS http://127.0.0.1:3000/translate \
 | `POST /imme` | Immersive Translate-compatible text list |
 | `POST /detect` | small English/CJK heuristic, not general language ID |
 | `GET /livez` | event-loop liveness |
-| `GET /readyz` | model worker ready to accept traffic |
+| `GET /readyz` | model worker lifecycle is ready; it does not report spare queue capacity |
 | `GET /health` | compatibility `{"status":"ok"}` response |
 | `GET /info` | version, revision, backend, device, precision, attention mode, model, and uptime |
 | `GET /metrics` | Prometheus counters and gauges |
 
 Region variants such as `en-US`, `en_US`, `zh-CN`, and `zh-Hans` are normalized
 to `en` and `zh`. The current release supports only English to Chinese.
-`max_output_tokens` is supported by both the direct Metal and pure-Rust CPU
-backends.
+
+| Endpoint | Accepted JSON fields | Limits |
+|---|---|---|
+| `POST /translate` | `text`, optional `from`, required `to`, optional `max_output_tokens`; `source_lang` and `target_lang` are aliases for `from` and `to` | `max_output_tokens` defaults to 512 and is clamped to 1-2,048 |
+| `POST /imme` | optional `source_lang`, required `target_lang`, required `text_list` | at most 256 nonempty items; its contract does not define `max_output_tokens`, so each item starts with the default 512-token budget |
+| `POST /detect` | required `text`; returns `{"language":"en"}` or `{"language":"zh"}` | heuristic English/CJK detection only |
+
+Do not mix the two request shapes. The complete JSON request body, including
+JSON syntax and all list items, is limited to 64 KiB. Each text item must also
+be nonempty. `max_output_tokens` works with both direct Metal and pure-Rust CPU
+when using `/translate`; it is a caller ceiling, so EOS and backend
+model/runtime limits may stop generation earlier.
 
 ## Current scope
 
@@ -184,14 +228,16 @@ most 4,095 source pieces plus EOS. Longer text is split at tokenizer-aware
 sentence boundaries and reassembled in order while preserving separators,
 including newlines. Automatic segmentation retains one shared
 `max_output_tokens` budget for the original item. The HTTP contract separately
-limits text to 64 KiB. CPU also bounds padded-attention work because its encoder
-attention is quadratic; fused Metal attention has linear score-scratch growth.
+limits the complete JSON request body to 64 KiB. CPU also bounds
+padded-attention work because its encoder attention is quadratic; fused Metal
+attention avoids materializing a quadratic score matrix.
 
 The Q8 backend matches all five release golden translations exactly. On a
 200-item differential corpus it matched the retired CPU reference exactly on
 164 items; near-tie token choices account for the remaining differences, so
-this is not a claim of bit-for-bit output equivalence. Tested repeated
-80-sentence input and newline cases matched the retired long-text baseline.
+this is not a claim of bit-for-bit output equivalence. This 164/200 comparison
+and the repeated 80-sentence/newline checks are historical engineering evidence
+whose raw result artifact is not checked into this repository.
 
 ## Architecture
 
@@ -287,12 +333,14 @@ MARIAN_MLX_METAL_FLASH_THRESHOLD=1 \
 
 On the measured Apple M1 / 16 GB host, the deployment throughput knee is
 `--max-batch-size 16 --batch-window-us 750` with about 32 concurrent short
-requests. Concurrency 64 produced essentially no additional throughput and
-roughly doubled median latency. The M1-qualified duplicate-row width defaults
-to 9 and can be overridden with
-`MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH`; this coalesces exact duplicates only
-inside the current dynamic batch and does not cache results. The remaining M1
-defaults are decode row budget 54, at most six steps per submission, 256
+requests in the v0.6 qualification. A historical v0.4 mixed-f16 sweep found no
+further gain at concurrency 64 and substantially higher median latency; that
+older point is a sizing warning, not current v0.6 FP32 proof. The M1-qualified
+duplicate-row width defaults to 9 and can be overridden with
+`MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH`. Core always coalesces exact logical
+duplicates; this knob rematerializes up to that many physical rows inside the
+current dynamic batch for GPU occupancy and never caches results. The remaining
+M1 defaults are decode row budget 54, at most six steps per submission, 256
 selection threads, and custom FP32 GEMM disabled; `/info` reports the resolved
 profile. Use FP32 for the exact qualified output contract. `mixed-f16` is the
 memory-first option and differed on 2/200 corpus outputs. M2-M4 profiles are
@@ -311,8 +359,10 @@ build output stay out of Git.
 
 ## Performance
 
-The v0.6.0 binary and a freshly rebuilt v0.1.0 MLX binary were measured live on
-the same loaded M1 desktop. Three-run medians improved from 486.64 to 546.19
+The final v0.6.0 release candidate and a freshly rebuilt v0.1.0 MLX binary were
+measured live on the same loaded M1 desktop. The measured candidate reported
+0.5.0 because the version bump had not yet been committed; the v0.6.0 release
+uses the same inference source. Three-run medians improved from 486.64 to 546.19
 item/s for 1,000 short requests (+12.2%) and from 116.68 to 149.14 item/s for
 five 200-item corpus requests (+27.8%). Flash q4 was 12.3% and 4.9% faster than
 the same final binary's classic attention path, with identical output hashes.

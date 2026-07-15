@@ -9,7 +9,7 @@ failure case or benchmark are easiest to review.
 2. Keep generated models, weights, build directories, and benchmark dumps out
    of Git. They are intentionally ignored.
 3. Add tests for behavior changes and document user-visible flags or endpoints.
-4. Run `make check` on every change.
+4. Run `make check` on every change; it includes documentation contracts.
 
 The portable checks do not need Metal or a model. On Apple Silicon, changes to
 the native backend should additionally run:
@@ -18,11 +18,14 @@ the native backend should additionally run:
 scripts/prepare-enzh-model.sh
 scripts/build-release.sh
 cargo test -p marian-tokenizer --test mozilla_enzh -- --ignored
-cargo test -p marian-mlx --features metal --test golden -- --ignored
-MARIAN_MLX_MODEL_DIR=models/enzh cargo test -p marian-mlx --features metal \
+cargo test -p marian-metal --features metal --test golden -- --ignored
+MARIAN_MLX_MODEL_DIR=models/enzh cargo test -p marian-metal --features metal \
   --release --test cpu_metal_differential -- --ignored
-cargo test -p marian-cpu --release --test golden -- --ignored
-cargo test -p marian-cpu --release --test q8_golden -- --ignored
+MARIAN_CPU_MODEL_DIR="$PWD/models/enzh" \
+  cargo test -p marian-cpu --release --test golden -- --ignored
+MARIAN_Q8_MODEL=/absolute/path/to/model.intgemm.alphas.bin \
+MARIAN_CPU_MODEL_DIR="$PWD/models/enzh" \
+  cargo test -p marian-cpu --release --test q8_golden -- --ignored
 ```
 
 The legacy `mlx` feature is only a compatibility alias. New commands, tests,
@@ -61,30 +64,33 @@ Metal trace or equivalent device evidence.
 ## Release checklist
 
 Release tags drive both the macOS archive and the multi-architecture CPU image.
-Before creating a tag:
+Complete the following on the release commit before creating a tag:
 
 1. Update the workspace and repository-owned dependency versions in
    `Cargo.toml`, regenerate `Cargo.lock`, and update the Dockerfile's default
    version. The `vX.Y.Z` tag must exactly match the workspace version.
 2. Move the relevant `CHANGELOG.md` entries out of `Unreleased`, add the release
-   date, and update its comparison links.
+   date, update its comparison links, and switch both READMEs' pinned installer
+   and container examples to the exact version about to be tagged. The tag will
+   freeze this same commit, so these changes cannot be deferred until after it.
 3. Run `make check`, `scripts/package-macos.sh`, the Metal profiler parser
-   tests, and the ignored model-backed golden/differential tests listed above.
-   Verify the packaged archive and its checksums, not only the build tree.
-4. Let CI pass on the release commit before pushing the tag. Release tags and
-   assets are immutable: never move a published tag or replace an existing
-   asset. Confirm the workflow publishes `marian-mlx-macos-arm64.tar.gz`,
-   `SHA256SUMS`, and `install-macos.sh`, and that their provenance attestations
-   are present.
-5. Confirm `ghcr.io/malusama/marian-mlx:cpu-X.Y.Z` and the floating `:cpu` tag
-   both contain Linux AMD64 and ARM64 manifests built from the tagged commit.
-6. Exercise a fresh pinned macOS install, `/readyz`, `/info`, update, rollback,
-   and uninstall. Confirm the backend, revision, device, precision, and model
-   reported by `/info` match the intended release.
+   tests, and the ignored
+   model-backed golden/differential tests listed above. Verify the packaged
+   archive and its checksums, not only the build tree.
+4. Let CI pass on the exact release commit, then create and push the immutable
+   `vX.Y.Z` tag. Never move a published tag or replace an existing asset.
 
-Only after these checks should the README's unreleased-runtime warning be
-removed and its installer/container examples be switched back to published
-artifacts.
+After pushing the tag:
+
+5. Confirm the release workflow publishes
+   `marian-mlx-macos-arm64.tar.gz`, `SHA256SUMS`, and `install-macos.sh`, and
+   that their provenance attestations are present.
+6. Confirm `ghcr.io/malusama/marian-mlx:cpu-X.Y.Z` and the floating `:cpu` tag
+   both contain Linux AMD64 and ARM64 manifests built from the tagged commit.
+7. Exercise a fresh pinned macOS install, `/readyz`, `/info`, update, rollback,
+   and uninstall. Confirm the backend, revision, device, precision, and model
+   reported by `/info` match the intended release. If a published artifact is
+   wrong, fix it in a new patch release instead of changing the existing tag.
 
 ## Licensing
 

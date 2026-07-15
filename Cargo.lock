@@ -587,7 +587,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "marian-mlx"
+name = "marian-metal"
 version = "0.6.0"
 dependencies = [
  "half",
@@ -623,7 +623,7 @@ dependencies = [
  "http-body-util",
  "marian-core",
  "marian-cpu",
- "marian-mlx",
+ "marian-metal",
  "serde",
  "serde_json",
  "tokio",

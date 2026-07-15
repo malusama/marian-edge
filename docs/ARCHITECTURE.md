@@ -25,7 +25,7 @@ canonical ordering + direction/shape micro-batching
     v
 one backend-owner OS thread per loaded model
     |
-    +--> marian-mlx --> embedded MSL / MPS --> Metal GPU
+    +--> marian-metal --> embedded MSL / MPS --> Metal GPU
     |
     +--> marian-cpu --> Q8 or FP32 Rust graph --> CPU kernels
 ```
@@ -43,10 +43,10 @@ and makes failure and shutdown state explicit.
 | `marian-model` | Manifest schema, artifact paths, checksums, architecture metadata, and shortlist loading | HTTP or scheduling policy |
 | `marian-tokenizer` | Pure-Rust SentencePiece inference boundary | Text-segmentation policy or backend graph code |
 | `marian-cpu` | Portable FP32 and Q8 Transformer/SSRU executors, CPU kernels, scratch reuse, and CPU-specific work limits | HTTP contracts or Metal policy |
-| `marian-mlx` | Metal backend, graph engine, embedded kernels, command submission, workspace/cache lifetimes, and device tuning | HTTP contracts or generic scheduler policy |
+| `marian-metal` | Metal backend, graph engine, embedded kernels, command submission, workspace/cache lifetimes, and device tuning | HTTP contracts or generic scheduler policy |
 | `marian-server` | Axum routes, request/body limits, CORS, health/readiness, backend selection, and protocol compatibility | Length bucketing, duplicate occupancy policy, or inference arithmetic |
 
-`marian-mlx` has no production dependency on `marian-cpu`. Its CPU dependency
+`marian-metal` has no production dependency on `marian-cpu`. Its CPU dependency
 is dev-only and exists for differential tests. Both production backends depend
 on the shared contracts in `marian-core`, `marian-model`, and, when enabled,
 `marian-tokenizer`.
@@ -60,10 +60,31 @@ Use this placement rule when adding code:
 | Manifest, checksum, tensor metadata, or shortlist format | `marian-model` |
 | SentencePiece encoding/decoding | `marian-tokenizer` |
 | CPU arithmetic, dispatch, representation, or scratch strategy | `marian-cpu` |
-| GPU arithmetic, resource lifetime, command grouping, or device tuning | `marian-mlx` |
+| GPU arithmetic, resource lifetime, command grouping, or device tuning | `marian-metal` |
 
 In particular, M-series tile widths, decode submission sizes, and occupancy
 floors belong in Metal tuning, never in core scheduling.
+
+The Rust package and source directory are both `marian-metal` and
+`crates/marian-metal`. The repository, installed executable, archive, service,
+metrics, and `MARIAN_MLX_*` environment contract retain the Marian MLX name for
+deployment compatibility. The `mlx` Cargo feature and CLI backend value remain
+aliases for direct Metal; they do not link the MLX runtime.
+
+## Model boundary
+
+New model manifests use the backend-neutral
+`marian-edge.transformer-ssru.v1` namespace. Loaders, the installer, and the
+controller continue to accept the historical
+`marian-mlx.transformer-ssru.v1` value so existing verified model directories
+remain usable. The converter keeps the existing safetensors metadata label and
+weight bytes stable; changing the manifest namespace alone must not invalidate
+the published FP32 weight checksum.
+
+`marian-model` owns graph schema, architecture validation, the model-position
+limit, and the shared sinusoidal table. CPU source, generation, batch, and
+padded-attention limits remain private to `marian-cpu`; device tuning remains
+private to `marian-metal`.
 
 ## Long-text contract
 
@@ -74,15 +95,19 @@ preserves separators, whitespace, newlines, and source order.
 
 The execution limit remains backend-specific:
 
-| Backend | Maximum source segment | Additional work bound |
-|---|---:|---|
-| CPU | 255 source pieces plus EOS | bounded `batch * padded_source_length^2` attention work |
-| Metal | 4095 source pieces plus EOS | 4096-position model/runtime limit |
+| Backend | Maximum source segment | Per-segment generation ceiling | Additional work bound |
+|---|---:|---|---|
+| CPU | 255 source pieces plus EOS | minimum of remaining caller budget, `source_tokens * manifest_factor`, and 256 steps | bounded `batch * padded_source_length^2` attention work |
+| Metal | 4095 source pieces plus EOS | minimum of remaining caller budget, `source_tokens * manifest_factor`, and 4096 positions | 4096-position model/runtime limit |
 
 Each input still produces one output. Segments are reassembled in order, and
 the original input's `max_output_tokens` is one shared budget across all
 segments rather than a fresh budget per segment. The HTTP layer separately
-limits text to 64 KiB; transport limits do not replace backend token limits.
+limits the complete JSON request body to 64 KiB; `/imme` accepts at most 256
+nonempty items, and every text item must be nonempty. Transport limits do not
+replace backend token limits. `max_output_tokens` is a caller ceiling, not a
+promise to generate that many tokens; EOS and model/runtime ceilings may stop
+generation earlier.
 
 ## Scheduling contract
 
@@ -162,8 +187,11 @@ The Metal crate is split by reason to change:
 | `metal_runtime` | Metal/MPS objects, command buffers, pipelines, matrix views, and device legality | Model graph or request policy |
 | `workspace` | Request/transient arenas and frame lifetime enforcement | Model semantics or tuning values |
 
-Policy flows from `config` through `tuning` and `backend` into the engine;
-mechanism flows from `engine/decode` through `engine/ops` to `metal_runtime` and
+Process input is parsed into `MetalConfig`, then
+`MetalBackend::load_with_config` validates artifacts and calls
+`MetalEngine::load`. The engine selects the device, resolves `MetalTuning`, and
+exposes resolved identity and duplicate width back to the backend. Mechanism
+flows from `engine/decode` through `engine/ops` to `metal_runtime` and
 `workspace`. The primitive layer never depends back on decode, and model
 loading never depends on either decode or primitive dispatch. Keep those
 directions when adding a kernel, model format, or device profile.
@@ -192,6 +220,11 @@ GEMM, decode-submission, and duplicate-row policy. Auto detection selects an
 M1, M2, M3, M4, or generic profile; `MARIAN_MLX_METAL_PROFILE` can override it
 for controlled qualification. `/info` includes the active profile with the
 attention label.
+
+`MARIAN_MLX_METAL_*` is the canonical tuning namespace, consistent with the
+rest of the installed product. `MARIAN_EDGE_METAL_*` is accepted as an alias;
+setting both names to different values fails closed instead of choosing one
+silently.
 
 The M1 defaults are measured in the v0.6.0 release qualification on the
 documented Apple M1 host. Later-family and generic defaults are conservative

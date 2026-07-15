@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help fmt lint test check build-macos model package docker-build docker-up
+.PHONY: help fmt lint test docs-check check build-macos model package docker-build docker-up
 
 help: ## Show common developer commands
 	@awk 'BEGIN {FS = ":.*## "; print "Marian MLX developer commands:"} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -16,7 +16,11 @@ test: ## Run the portable unit and API tests
 	cargo test --workspace --locked
 	cargo test --locked -p marian-server --all-targets --features cpu
 
-check: ## Run the portable Rust checks
+docs-check: ## Check documentation, deployment, and API contracts
+	python3 -m py_compile tools/check_docs.py
+	python3 tools/check_docs.py
+
+check: docs-check ## Run the portable documentation and Rust checks
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo test --workspace --locked

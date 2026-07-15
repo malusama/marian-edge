@@ -5,6 +5,41 @@ Versioning after the first stable release.
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the internal direct-Metal Rust package and source directory to
+  `marian-metal` / `crates/marian-metal`. This is a Rust package/import change
+  for the next minor release; repository, binary, archive, service, image, CLI
+  alias, and installer names remain `marian-mlx` compatible.
+- Made `marian-edge.transformer-ssru.v1` the canonical manifest namespace for
+  new CPU/Metal model producers while loaders, installer, and controller retain
+  the historical manifest value. Safetensors metadata stays byte-stable so the
+  published FP32 weight checksum does not change.
+- Centralized graph validation and sinusoidal positions in `marian-model`, and
+  centralized CPU-only execution limits privately in `marian-cpu` instead of
+  leaking backend policy into the model schema.
+- Kept `MARIAN_MLX_METAL_*` as the canonical product tuning namespace, accepted
+  `MARIAN_EDGE_METAL_*` aliases, and made conflicting values fail closed.
+- Added a zero-dependency documentation contract check for release versions,
+  relative links, public routes, Immersive Translate fields and limits, and
+  native/Docker port mappings; CI and release gates now run it.
+- Made the Docker Compose host port and image configurable through
+  `MARIAN_MLX_HOST_PORT` and `MARIAN_MLX_IMAGE` while retaining container port
+  3000 and loopback-only host publication by default.
+
+### Fixed
+
+- Switched release panic handling to unwind so the existing HTTP boundary and
+  backend-owner guard can turn a panic into terminal not-ready state; added a
+  scheduler regression for failed readiness and future admission.
+- Added model-backed FP32 and `/imme` adapter regressions for Immersive
+  Translate's numbered and paired-tag placeholders.
+- Aligned native, Docker, health-check, API, and Immersive Translate examples
+  so a custom host port such as 3100 is used consistently end to end.
+- Corrected readiness/queue error semantics, complete JSON body and `/imme`
+  limits, endpoint field mappings, installed-service lifecycle commands,
+  release sequencing, and performance-evidence boundaries across the docs.
+
 ## [0.6.0] - 2026-07-16
 
 ### Added
@@ -58,15 +93,17 @@ Versioning after the first stable release.
 - Fixed request MPS views retaining old arena buffers and per-decode history
   allocations growing to the model's maximum output length.
 - Replaced post-MPS compute-encoder `expect` failures with propagated errors;
-  any failure after request execution begins now marks the backend not-ready,
+  Metal command creation or execution failures now mark the backend not-ready,
   while caller validation errors remain non-fatal.
 - Synchronized Docker and English/Chinese installation metadata with v0.6.0.
 
 ### Performance
 
-- On the live Apple M1 comparison, v0.6.0 reached three-run medians of 546.19
-  item/s for 1,000 repeated short requests and 149.14 item/s for five 200-item
-  corpus requests: 12.2% and 27.8% above a freshly rebuilt v0.1.0 MLX binary.
+- On the live Apple M1 comparison, the final v0.6.0 release candidate reached
+  three-run medians of 546.19 item/s for 1,000 repeated short requests and
+  149.14 item/s for five 200-item corpus requests: 12.2% and 27.8% above a
+  freshly rebuilt v0.1.0 MLX binary. The measured binary still reported 0.5.0;
+  the release uses the same inference source.
 - Against the same final binary's classic attention path, Flash q4 improved
   short and corpus throughput by 12.3% and 4.9% with identical output hashes.
 - Metal FP32 matched CPU FP32 on 200/200 deterministic items. A 300-request

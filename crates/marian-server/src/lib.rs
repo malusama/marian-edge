@@ -480,6 +480,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn immersive_adapter_preserves_reserved_placeholder_bytes_and_order() {
+        let (app, translator) = test_app();
+        let placeholders = ["{0} Hello {1} world.", "<b0></b0> Hello <b1></b1> world."];
+        let body = serde_json::to_vec(&serde_json::json!({
+            "source_lang": "en",
+            "target_lang": "zh",
+            "text_list": placeholders
+        }))
+        .unwrap();
+        let response = app
+            .oneshot(
+                Request::post("/imme")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: ImmersiveResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.translations[0].text, placeholders[0]);
+        assert_eq!(body.translations[1].text, placeholders[1]);
+        translator.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn immersive_validates_every_item_before_submitting_work() {
         let (app, translator) = test_app();
         let response = app
@@ -496,6 +523,60 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(translator.stats().snapshot().accepted, 0);
+        translator.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn documented_body_item_and_endpoint_shape_limits_are_enforced() {
+        let (app, translator) = test_app();
+        let oversized = serde_json::to_vec(&serde_json::json!({
+            "text": "a".repeat(MAX_TEXT_BYTES),
+            "from": "en",
+            "to": "zh"
+        }))
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/translate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(oversized))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let too_many_items = serde_json::to_vec(&serde_json::json!({
+            "source_lang": "en",
+            "target_lang": "zh",
+            "text_list": vec!["a"; 257]
+        }))
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/imme")
+                    .header("content-type", "application/json")
+                    .body(Body::from(too_many_items))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .oneshot(
+                Request::post("/imme")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"from":"en","to":"zh","text_list":["hello"]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         translator.shutdown().await;
     }
 

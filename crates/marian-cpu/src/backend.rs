@@ -7,14 +7,13 @@ use marian_model::ModelManifest;
 
 use crate::{
     engine::{BatchOutput, CpuEngine},
+    limits::{
+        MAXIMUM_ENGINE_BATCH, MAXIMUM_PADDED_ATTENTION_CELLS, MAXIMUM_SOURCE_TOKENS,
+        MAXIMUM_TRANSLATION_SEGMENTS,
+    },
     q8_engine::Q8CpuEngine,
     segment_text,
 };
-
-const MAX_SOURCE_TOKENS: usize = 256;
-const MAX_ENGINE_BATCH: usize = 256;
-const MAX_PADDED_ATTENTION_CELLS: usize = 65_536;
-const MAX_TRANSLATION_SEGMENTS: usize = 4_096;
 
 /// Minimal text/token boundary needed by [`CpuBackend`].
 ///
@@ -127,7 +126,7 @@ fn translate_with_engine(
     let mut work = (0..inputs.len()).map(|_| Vec::new()).collect::<Vec<_>>();
     let mut total_work = 0_usize;
     for (input_index, input) in inputs.iter().enumerate() {
-        let segments = segment_text(&input.text, MAX_SOURCE_TOKENS - 1, |text| {
+        let segments = segment_text(&input.text, MAXIMUM_SOURCE_TOKENS - 1, |text| {
             source.encode(text).map(|pieces| pieces.len())
         })
         .map_err(|error| BackendError::InvalidInput(error.to_string()))?;
@@ -148,9 +147,9 @@ fn translate_with_engine(
                 continue;
             }
 
-            if total_work >= MAX_TRANSLATION_SEGMENTS {
+            if total_work >= MAXIMUM_TRANSLATION_SEGMENTS {
                 return Err(BackendError::InvalidInput(format!(
-                    "batch requires more than {MAX_TRANSLATION_SEGMENTS} translated segments"
+                    "batch requires more than {MAXIMUM_TRANSLATION_SEGMENTS} translated segments"
                 )));
             }
             let mut pieces = source.encode(content).map_err(|error| {
@@ -173,9 +172,9 @@ fn translate_with_engine(
                 )));
             }
             pieces.push(eos_id);
-            if pieces.len() > MAX_SOURCE_TOKENS {
+            if pieces.len() > MAXIMUM_SOURCE_TOKENS {
                 return Err(BackendError::Inference(format!(
-                    "segmented source has {} tokens including EOS; maximum is {MAX_SOURCE_TOKENS}",
+                    "segmented source has {} tokens including EOS; maximum is {MAXIMUM_SOURCE_TOKENS}",
                     pieces.len()
                 )));
             }
@@ -224,7 +223,7 @@ fn translate_with_engine(
             let Some(segment) = segments.get(positions[input_index]) else {
                 continue;
             };
-            if batch.len() >= MAX_ENGINE_BATCH {
+            if batch.len() >= MAXIMUM_ENGINE_BATCH {
                 break;
             }
             let candidate_length = maximum_length.max(segment.tokens.len());
@@ -233,7 +232,7 @@ fn translate_with_engine(
                 .checked_mul(candidate_length)
                 .and_then(|value| value.checked_mul(candidate_length))
                 .unwrap_or(usize::MAX);
-            if attention_cells > MAX_PADDED_ATTENTION_CELLS {
+            if attention_cells > MAXIMUM_PADDED_ATTENTION_CELLS {
                 continue;
             }
             maximum_length = candidate_length;

@@ -79,7 +79,7 @@ rm -f "$LEGACY_MODEL" "$LEGACY_MODEL.part" "$LEGACY_MODEL.gz.part"
 MANIFEST="$MODEL_DIR/manifest.json"
 cat > "$MANIFEST.part" <<EOF
 {
-  "format": "marian-mlx.transformer-ssru.v1",
+  "format": "marian-edge.transformer-ssru.v1",
   "model_id": "mozilla-firefox-translations-en-zh-base-memory",
   "source_lang": "en",
   "target_lang": "zh",

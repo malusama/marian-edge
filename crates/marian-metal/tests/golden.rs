@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use marian_core::{TranslationBackend, TranslationInput};
-use marian_mlx::MetalBackend;
+use marian_metal::MetalBackend;
 
 #[test]
 #[ignore = "requires converted Mozilla en-zh weights and an Apple GPU"]
@@ -25,6 +25,25 @@ fn matches_known_sentences() {
         .collect();
     let outputs = backend.translate_batch(&inputs).unwrap();
     for ((_, expected), actual) in cases.iter().zip(outputs) {
+        assert_eq!(&actual.text, expected);
+    }
+
+    // Immersive Translate reserves numbered and paired-tag placeholders. This
+    // is a protocol-compatibility regression, separate from the five release
+    // translation goldens above.
+    let placeholder_cases = [
+        ("{0} Hello {1} world.", "{0} Hello {1} 世界。"),
+        (
+            "<b0></b0> Hello <b1></b1> world.",
+            "<b0></b0> Hello <b1></b1> 世界。",
+        ),
+    ];
+    let placeholder_inputs = placeholder_cases
+        .iter()
+        .map(|(source, _)| TranslationInput::new(*source, "en", "zh"))
+        .collect::<Vec<_>>();
+    let placeholder_outputs = backend.translate_batch(&placeholder_inputs).unwrap();
+    for ((_, expected), actual) in placeholder_cases.iter().zip(placeholder_outputs) {
         assert_eq!(&actual.text, expected);
     }
 

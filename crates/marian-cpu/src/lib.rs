@@ -11,6 +11,7 @@ mod backend;
 pub mod benchmarking;
 mod engine;
 mod legacy_q8;
+mod limits;
 mod q8_arm;
 mod q8_avx2;
 mod q8_engine;
