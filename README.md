@@ -5,8 +5,9 @@
 
 Local English-to-Chinese translation with a Rust HTTP service. On Apple
 Silicon, a Rust inference host drives Metal directly through `objc2-metal` and
-runtime-compiles embedded MSL compute kernels. It does not link MLX or use a
-C++ inference bridge. Linux and other portable builds use a pure-Rust CPU
+runtime-compiles embedded MSL compute kernels, including fused
+FlashAttention-style online softmax. It does not link MLX or use a C++ inference
+bridge. Linux and other portable builds use a pure-Rust CPU
 engine with complete Q8 and FP32 Transformer/SSRU graphs, a lexical shortlist,
 and greedy decoding.
 
@@ -43,8 +44,8 @@ For a reproducible pinned install:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.3.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.3.0 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.4.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.4.0 sh
 ```
 
 `v0.1.1` remains available as the last historical MLX/Bergamot release. Its
@@ -86,7 +87,7 @@ Or without Compose:
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu-0.2.1
+  ghcr.io/malusama/marian-mlx:cpu-0.4.0
 ```
 
 The published image is multi-architecture AMD64/ARM64, non-root, and CPU-only.
@@ -122,8 +123,8 @@ available for a loopback-only personal deployment:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.3.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.3.0 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.4.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.4.0 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 For Docker, add `MARIAN_MLX_CORS_ORIGIN: "*"` under `environment` only if required.
@@ -150,7 +151,7 @@ curl -fsS http://127.0.0.1:3000/translate \
 | `GET /livez` | event-loop liveness |
 | `GET /readyz` | model worker ready to accept traffic |
 | `GET /health` | compatibility `{"status":"ok"}` response |
-| `GET /info` | version, revision, backend, device, precision, model, and uptime |
+| `GET /info` | version, revision, backend, device, precision, attention mode, model, and uptime |
 | `GET /metrics` | Prometheus counters and gauges |
 
 Region variants such as `en-US`, `en_US`, `zh-CN`, and `zh-Hans` are normalized
@@ -177,9 +178,10 @@ backends.
 | general language detection | not included |
 
 Each `/imme` list item remains one output item. The Metal source limit is 4,096
-tokens. The CPU engine keeps each inference chunk within 255 source pieces plus
-EOS and a bounded padded-attention budget because encoder attention is
-quadratic. Longer text is split at tokenizer-aware sentence boundaries and
+tokens; its default fused attention path has linear score-scratch growth. The
+CPU engine keeps each inference chunk within 255 source pieces plus EOS and a
+bounded padded-attention budget because its encoder attention is quadratic.
+Longer text is split at tokenizer-aware sentence boundaries and
 reassembled in order while preserving separators, including newlines.
 
 The Q8 backend matches all five release golden translations exactly. On a
@@ -265,6 +267,28 @@ FP32. It matched 198/200 translations exactly in the deterministic CPU-FP32
 versus Metal corpus, so deployments that require the FP32 token contract must
 leave the variable unset.
 
+Metal attention defaults to the fused four-query path for the current model's
+encoder self-attention and decoder cross-attention. It streams 32-key tiles,
+uses online softmax, and never writes an O(N^2) score matrix. `/info` reports
+`flash-q4-auto@1`. Keep `auto` in production; `classic` and forced `flash` are
+available for qualification and A/B measurements:
+
+```sh
+MARIAN_MLX_METAL_ATTENTION=classic \
+  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+
+MARIAN_MLX_METAL_ATTENTION=auto \
+MARIAN_MLX_METAL_FLASH_THRESHOLD=1 \
+  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+```
+
+On the measured Apple M1 / 16 GB host, the deployment throughput knee is
+`--max-batch-size 16 --batch-window-us 750` with about 32 concurrent short
+requests. Concurrency 64 produced essentially no additional throughput and
+roughly doubled median latency. Use FP32 for the exact qualified output
+contract. `mixed-f16` is the memory-first option: it reduced peak RSS by about
+25% with effectively flat throughput, but differed on 2/200 corpus outputs.
+
 `mlx` remains accepted as a feature and backend alias for existing automation,
 but it selects the same direct Metal implementation. MSL source is embedded in
 the executable and compiled through the Metal framework at process startup, so
@@ -278,13 +302,14 @@ build output stay out of Git.
 
 ## Performance
 
-The direct Metal backend now has a commit-pinned M1 result, 200-item parity
-report, peak-memory measurements, and Instruments trace. On that run, explicit
-mixed-f16 storage improved single-sentence throughput by 23.4% and reduced
-peak RSS by 25.2% versus direct Metal FP32; corpus throughput improved 4.2% and
-peak RSS fell 35.2%. These are engineering measurements on one Apple M1, not
-M2-M4 claims. Exact commands, model and corpus hashes, latency distributions,
-Q8 allocation results, and the retired MLX baseline are in
+The direct Metal backend has a commit-pinned M1 result, 200-item parity report,
+peak-memory measurements, and Instruments trace. Fused attention improved the
+current direct-Metal runtime by 2.8% on concurrent short requests and 3.5% on
+the corpus; encoder-isolated long-sequence p50 improved by up to 26.5%. A new
+same-settings comparison also records that the first v0.1.0 MLX runtime remains
+faster on these short workloads. These are engineering measurements on one
+Apple M1, not M2-M4 claims. Exact commands, model and corpus hashes, latency
+distributions, Q8 allocation results, and the retired MLX baseline are in
 [the benchmark notes](docs/BENCHMARKS.md).
 
 ## Security, maintenance, and licensing

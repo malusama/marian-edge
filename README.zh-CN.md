@@ -2,7 +2,8 @@
 
 一个本地英译中服务。Apple Silicon 原生版由 Rust host 通过 `objc2-metal`
 直接驱动 Metal，并在启动时编译内嵌的 MSL compute kernel，不再链接 MLX，
-也没有 C++ 推理桥。Linux Docker 和其他跨平台构建使用纯 Rust CPU 引擎，
+其中包括融合在线 softmax 的 FlashAttention-style kernel；也没有 C++ 推理桥。
+Linux Docker 和其他跨平台构建使用纯 Rust CPU 引擎，
 完整支持 Q8 与 FP32 Transformer/SSRU 计算图、词表 shortlist 和贪心解码。
 
 项目名为兼容性继续保留。分词、长文本分段、调度、模型加载和两套推理 host
@@ -34,8 +35,8 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.1/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.2.1 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.4.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.4.0 sh
 ```
 
 安装器不需要 root，会校验 Release 和所有模型文件；模型由用户机器直接从
@@ -74,7 +75,7 @@ curl -fsS http://127.0.0.1:3000/info
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu-0.2.1
+  ghcr.io/malusama/marian-mlx:cpu-0.4.0
 ```
 
 发布镜像是 AMD64/ARM64 多架构、非 root、CPU-only。镜像不内置模型；第一次
@@ -105,8 +106,8 @@ CORS 错误，可在只绑定本机的前提下重新运行固定版本安装器
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.1/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.2.1 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.4.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.4.0 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 Docker 可在 `compose.yaml` 的 `environment` 中增加
@@ -133,7 +134,7 @@ curl -fsS http://127.0.0.1:3000/translate \
 | `GET /livez` | 进程与事件循环存活 |
 | `GET /readyz` | 模型已加载且调度器可接收请求 |
 | `GET /health` | 旧客户端兼容接口 |
-| `GET /info` | 版本、提交、后端、设备、精度、模型、运行时间 |
+| `GET /info` | 版本、提交、后端、设备、精度、attention 模式、模型、运行时间 |
 | `GET /metrics` | Prometheus 指标 |
 
 `en-US`、`en_US`、`zh-CN`、`zh-Hans` 会归一化为 `en` 和 `zh`。当前版本只
@@ -227,6 +228,26 @@ cargo build --locked --release -p marian-server --features metal
 target/release/marian-mlx-server --backend metal --model-dir models/enzh
 ```
 
+当前模型默认使用四 query 分块、32 key 流式读取的 FlashAttention-style
+实现，通过在线 softmax 避免写出 O(N^2) attention score 矩阵。`/info` 会报告
+`flash-q4-auto@1`。生产环境保持 `auto` 即可；`classic` 和强制 `flash` 用于
+兼容性验证和 A/B：
+
+```sh
+MARIAN_MLX_METAL_ATTENTION=classic \
+  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+
+MARIAN_MLX_METAL_ATTENTION=auto \
+MARIAN_MLX_METAL_FLASH_THRESHOLD=1 \
+  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+```
+
+这台 Apple M1 / 16 GB 机器的吞吐甜点是
+`--max-batch-size 16 --batch-window-us 750`，短请求并发约 32。并发增加到 64
+几乎不再提高吞吐，但 p50 大约翻倍。需要严格输出契约时用默认 FP32；内存优先
+可启用 `MARIAN_MLX_METAL_PRECISION=mixed-f16`，实测峰值 RSS 约降低 25%，吞吐
+基本持平，但 200 条语料中有 2 条与 FP32 不同。
+
 旧自动化仍可使用 `mlx` feature 或 `--backend mlx`，它们现在只是 direct Metal
 实现的兼容 alias。MSL 源码内嵌在可执行文件里，并在进程启动时通过 Metal
 framework 编译，因此不再需要 `libmlx.dylib`、外置 `.metallib`、MLX submodule
@@ -238,9 +259,11 @@ framework 编译，因此不再需要 `libmlx.dylib`、外置 `.metallib`、MLX 
 
 ## 性能
 
-此前公开的 M1 数字来自已经移除的 MLX 后端，不能当作 direct Metal 的成绩。
-新后端需要重新完成一致性、吞吐、延迟、内存与 Metal Trace 测量后，才能发布
-当前性能结论。历史基线和复测要求见 [BENCHMARKS](docs/BENCHMARKS.md)。
+FlashAttention-style 相对同一 direct Metal runtime 的 classic attention，
+并发短文本吞吐提高 2.8%，200 条语料吞吐提高 3.5%；隔离 encoder 的长序列
+p50 最多降低 26.5%。同条件复测也表明，最初 v0.1.0 的 MLX runtime 在短文本
+上仍然更快；文档不会把 runtime 重写误报成纯性能升级。完整分布、内存、输出
+一致性与历史基线见 [BENCHMARKS](docs/BENCHMARKS.md)。
 
 ## 安全、维护与许可证
 

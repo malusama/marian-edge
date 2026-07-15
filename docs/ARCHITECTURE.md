@@ -91,11 +91,20 @@ validated before loading. FP32 model storage is the default; the explicit
 `MARIAN_MLX_METAL_PRECISION=mixed-f16` mode converts uploaded model storage to
 FP16 while leaving activations and reductions in FP32, and reports that mode
 through `/info`.
-Embedding and each encoder layer are submitted separately so a retained Metal
-command buffer cannot keep all six quadratic attention-score allocations alive
-at once. Do not merge those submissions without measuring worst-case source
-length memory. A command-queue creation or execution failure also makes the
-backend not-ready so the scheduler stops admitting work to a failed device.
+Supported self-attention and single-query cross-attention shapes use a fused
+four-query Metal kernel. It streams 32-key tiles, updates an online softmax,
+and writes only the final value accumulation rather than an O(N^2) score
+matrix. `MARIAN_MLX_METAL_ATTENTION=classic` retains the three-kernel score,
+softmax, and value path for compatibility and controlled A/B measurements;
+unsupported head dimensions fall back to it. Attention mode is reported by
+`/info`.
+
+Embedding and each encoder layer remain separately submitted to bound all
+other arena lifetimes and to keep the classic fallback's worst-case score
+allocation scoped to one layer. Do not merge those submissions without
+measuring worst-case source-length memory. A command-queue creation or
+execution failure also makes the backend not-ready so the scheduler stops
+admitting work to a failed device.
 
 The public backend and Cargo feature are named `metal`. `mlx` remains only as a
 compatibility alias and selects the same implementation. A release does not

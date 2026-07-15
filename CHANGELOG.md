@@ -7,6 +7,39 @@ Versioning after the first stable release.
 
 No changes yet.
 
+## [0.4.0] - 2026-07-15
+
+### Added
+
+- Added a fused, forward-only FlashAttention-style Metal kernel. It processes
+  four query rows per SIMD group, streams 32-key tiles with online softmax, and
+  avoids materializing the quadratic attention-score matrix.
+- Added `MARIAN_MLX_METAL_ATTENTION=auto|classic|flash` and
+  `MARIAN_MLX_METAL_FLASH_THRESHOLD`; `/info` now exposes the selected
+  attention implementation.
+- Added `--max-output-tokens` to the HTTP benchmark driver for isolated
+  encoder/attention measurements.
+
+### Changed
+
+- Enabled the fused attention path by default for supported self-attention and
+  single-query cross-attention shapes, while retaining the classic kernels as
+  an explicit comparison and compatibility path.
+- Vectorized CPU bias, ReLU, SSRU residual, softmax scaling, and attention-value
+  accumulation with NEON or runtime-gated AVX2. Numerically sensitive dot,
+  softmax, sigmoid, and normalization reductions retain their scalar order.
+
+### Performance
+
+- On Apple M1, fused attention improved the documented concurrent short-text
+  FP32 workload by 2.8% and the 200-item workload by 3.5% versus the same
+  direct-Metal runtime's classic attention path.
+- On an encoder-isolated long-sequence workload, fused attention reduced p50
+  by 23.8% at roughly 40 repeated phrases and by 26.5% at 320 repeated phrases.
+- Re-measured the first v0.1.0 MLX release and the optimized direct-Metal
+  runtime under identical settings, including the remaining short-workload
+  performance gap and v0.1.0's nondeterministic repeated corpus outputs.
+
 ## [0.3.0] - 2026-07-15
 
 ### Added
@@ -113,7 +146,8 @@ No changes yet.
   `zh`.
 - Rootless launchd installer and CPU-only multi-architecture Docker path.
 
-[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/malusama/marian-mlx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/malusama/marian-mlx/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/malusama/marian-mlx/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/malusama/marian-mlx/compare/v0.1.1...v0.2.0

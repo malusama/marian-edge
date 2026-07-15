@@ -9,6 +9,8 @@ x86-64 and direct Metal remain required release paths.
 ## Current baseline (2026-07-15)
 
 - macOS production inference uses a Rust host and embedded MSL on direct Metal.
+- Supported Metal attention shapes use a fused four-query online-softmax
+  kernel by default and do not allocate an O(N^2) score matrix.
 - The FP32 CPU graph uses `matrixmultiply`.
 - The Q8 CPU graph keeps dense weights quantized and uses `rten-gemm`.
 - On the measured M1 Pro, `rten-gemm` selects
@@ -18,6 +20,8 @@ x86-64 and direct Metal remain required release paths.
 - Full-range x86 Q8 uses the repository's widening AVX2 kernel instead of a
   saturating `vpmaddubsw` path; machines without AVX2 use an exact scalar
   fallback.
+- CPU elementwise bias, ReLU, residual, softmax scaling, and attention-value
+  loops use NEON or runtime-gated AVX2 without reordering sensitive reductions.
 - `--cpu-threads` configures the Rayon and FP32 matrix-multiply pools, while
   model ownership and weights remain single-copy.
 
@@ -38,7 +42,7 @@ were 937.7/1354.5/1243.9 ms, with sampled peak RSS around
 the current Rayon overhead at higher thread counts, so one thread remains the
 default. These are engineering measurements, not published product claims.
 
-## Implementation status (commit `6fdcf8d1f681`)
+## Implementation status (commit `79e81466f418`)
 
 Every item below has been implemented or evaluated. Hardware-specific claims
 remain deliberately separate from code completion.
@@ -49,16 +53,19 @@ remain deliberately separate from code completion.
 | P1 Q8 allocation/data flow | complete | Engine-owned linear scratch, reusable tensor/attention/shortlist buffers, direct embedding dequantization, `run_into` APIs, and measured Rayon thresholds. |
 | P1 Q8 representation cost | complete | Runtime reports canonical, packed, and embedding bytes plus packed-build time; real artifact result is recorded in `BENCHMARKS.md`. |
 | P1 direct Metal | complete on M1 | Existing tiled matmul retained; FFN bias+ReLU fused; reusable buffer arena; long-text semantics unified; explicit mixed-f16 storage mode; current Metal System Trace captured. |
+| P1 fused attention | complete on M1 | Four-query/32-key tiled Metal kernel, online softmax, no O(N^2) score buffer, padding coverage, classic fallback, environment-controlled A/B path, real-model corpus qualification. |
 | M2/M3/M4 Metal tile tuning | hardware validation pending | The implementation and trace tooling are ready, but an M1 cannot establish family-specific optimum tile sizes. Do not copy the M1 result into M2-M4 claims. |
-| P2 Arm exact SIMD | complete | NEON exact-order residual addition plus every-tail tests. Floating-point reduction loops remain scalar until a reviewed tolerance permits reordering. |
+| P2 Arm/x86 safe FP32 SIMD | complete | NEON and runtime-gated AVX2 bias, ReLU, SSRU residual, softmax scaling, and attention-value accumulation with every-tail tests. Dot, sigmoid, softmax-sum, and normalization reductions remain scalar by correctness contract. |
 | P2 x86-64 | code complete; native performance pending | Exact widening AVX2, scalar fallback, tail oracle, and output-work threshold are covered. CI proves native startup; native AMD64 performance and optional VNNI/AVX-512 still require corresponding hardware. |
 | P3 read-only mapping | complete | FP32 safetensors and Q8 artifacts load through read-only mmap, then move into owned CPU or Metal storage. |
 | P3 checksum metadata cache | evaluated, not shipped | Skipping a full hash without a trusted external identity would weaken startup validation, violating the merge constraint. Downloads and activation remain atomic. |
 | P3 serialized packed cache | evaluated, not shipped | `rten-gemm 0.21` exposes no safe public constructor for a serialized `PackedBMatrix`; startup build time is measured instead of introducing an unsupported binary format. |
 
-The next performance work is therefore evidence collection on additional
-hardware, not an unimplemented generic optimization item. The current M1
-results, quality deltas, and profiler evidence are in
+All implementation items that can be qualified on the current M1 are complete.
+The remaining entries are hardware-specific validation or new arithmetic
+contracts: M2-M4 tile selection, native AMD64 measurements, optional VNNI or
+AVX-512 kernels, and any reduction-order change. Those cannot be honestly
+closed from an M1 result. The current M1 results, quality deltas, and profiler evidence are in
 [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ## P0: keep measurements and output contracts reproducible
@@ -142,6 +149,8 @@ submission separately before changing kernels.
    corpus-level quality and token-difference reporting.
 5. Capture Metal System Trace evidence for GPU occupancy, memory bandwidth,
    threadgroup pressure, and CPU submission gaps.
+6. Fuse attention score, masking, online softmax, and value accumulation so
+   supported shapes stream K/V tiles without a quadratic score allocation.
 
 Primary files:
 
@@ -149,23 +158,28 @@ Primary files:
 - `crates/marian-mlx/src/metal_runtime.rs`
 - `crates/marian-mlx/src/engine.rs`
 
-## P2: remaining Arm scalar loops
+## P2: scalar reduction boundary
 
-Attention, softmax, layer normalization, SSRU, and parts of residual handling
-still use scalar Rust loops. Optimize only after allocation work is measured.
-Floating-point reductions are sensitive to addition order, so a SIMD rewrite
-must report both numerical deltas and final token deltas. Prefer exact-order
-transformations where practical; otherwise define and review a tolerance before
-merging.
+The safe elementwise work is implemented. Attention score dots, softmax
+maximum/sum, layer-normalization statistics, and SSRU sigmoid/state updates
+remain scalar because changing their addition or transcendental order changes
+the numerical contract. This is a deliberate correctness boundary rather than
+an accidentally unfinished elementwise optimization.
 
-Candidates:
+Implemented operations:
 
-- NEON vector loads/stores for elementwise residual, bias, ReLU, and SSRU work.
-- A two-pass or compensated layer-normalization implementation with documented
-  error bounds.
-- Vectorized attention score/value loops with stable masking and softmax.
-- Fused Q8 dequantization plus bias/output writes when it does not change
-  rounding.
+- NEON and runtime-gated AVX2 bias addition, ReLU, SSRU ReLU/residual, softmax
+  scaling, and attention score-times-value accumulation.
+- Exact scalar key order is retained while independent output dimensions are
+  vectorized.
+- Tail lengths 0 through 65 are checked against scalar oracles.
+
+Possible future work requires an explicit new tolerance and corpus gate:
+
+- compensated or reordered layer-normalization reductions;
+- vectorized attention-score dot products and softmax reductions;
+- alternative sigmoid approximations;
+- fused Q8 output arithmetic if it can preserve quantization rounding.
 
 ## P2: x86-64 Q8
 
