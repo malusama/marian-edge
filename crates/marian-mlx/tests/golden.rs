@@ -1,17 +1,17 @@
-#![cfg(feature = "mlx")]
+#![cfg(all(feature = "metal", target_os = "macos", target_arch = "aarch64"))]
 
 use std::path::PathBuf;
 
 use marian_core::{TranslationBackend, TranslationInput};
-use marian_mlx::MlxBackend;
+use marian_mlx::MetalBackend;
 
 #[test]
 #[ignore = "requires converted Mozilla en-zh weights and an Apple GPU"]
-fn matches_known_bergamot_sentences() {
+fn matches_known_sentences() {
     let model_dir = std::env::var_os("MARIAN_MLX_MODEL_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("../../models/enzh"));
-    let mut backend = MlxBackend::load(model_dir).unwrap();
+    let mut backend = MetalBackend::load(model_dir).unwrap();
     let cases = [
         ("Hello, world!", "你好,世界!"),
         ("The weather is beautiful today.", "今天天气很美。"),
@@ -26,5 +26,24 @@ fn matches_known_bergamot_sentences() {
     let outputs = backend.translate_batch(&inputs).unwrap();
     for ((_, expected), actual) in cases.iter().zip(outputs) {
         assert_eq!(&actual.text, expected);
+    }
+
+    // The old MLX backend built one shortlist union for the entire packed
+    // batch, so neighboring requests could change a sentence's wording. The
+    // direct Metal decoder keeps candidates and length limits per row.
+    let invariant_cases = [
+        "Rust is a systems programming language.",
+        "Quantum entanglement puzzled Einstein.",
+    ];
+    let invariant_inputs = invariant_cases
+        .iter()
+        .map(|source| TranslationInput::new(*source, "en", "zh"))
+        .collect::<Vec<_>>();
+    let batched = backend.translate_batch(&invariant_inputs).unwrap();
+    for (input, batched_output) in invariant_inputs.iter().zip(batched) {
+        let single = backend
+            .translate_batch(std::slice::from_ref(input))
+            .unwrap();
+        assert_eq!(single[0].text, batched_output.text);
     }
 }

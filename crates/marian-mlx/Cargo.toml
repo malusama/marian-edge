@@ -1,26 +1,41 @@
 [package]
 name = "marian-mlx"
-description = "Apple Silicon MLX backend for Marian translation models"
+description = "Apple Silicon direct Metal backend for Marian translation models"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-links = "marian_mlx_bridge"
-build = "build.rs"
+
+[[test]]
+name = "cpu_metal_differential"
+path = "tests/cpu_metal_differential.rs"
+required-features = ["metal"]
 
 [features]
 default = []
-mlx = ["dep:cxx", "dep:sentencepiece"]
+metal = [
+    "dep:marian-tokenizer",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-metal",
+    "dep:safetensors",
+]
+# Compatibility for source builds which still pass `--features mlx`. This no
+# longer links MLX or compiles C++; it selects the direct Metal backend.
+mlx = ["metal"]
 
 [dependencies]
-cxx = { version = "1.0.194", optional = true }
 marian-core.workspace = true
-sentencepiece = { version = "0.13.1", optional = true }
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
+marian-model.workspace = true
+marian-tokenizer = { workspace = true, optional = true }
+safetensors = { workspace = true, optional = true }
 
-[build-dependencies]
-cxx-build = "1.0.194"
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true, optional = true }
+objc2-foundation = { workspace = true, optional = true }
+objc2-metal = { workspace = true, optional = true }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dev-dependencies]
+marian-cpu.workspace = true

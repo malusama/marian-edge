@@ -15,15 +15,17 @@ path = "src/main.rs"
 
 [features]
 default = []
-mlx = ["marian-mlx/mlx"]
-bergamot = ["dep:marian-bergamot"]
+metal = ["marian-mlx/metal"]
+mlx = ["metal"]
+cpu = ["dep:marian-cpu"]
+cpu-fp32 = ["cpu"]
 
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
-marian-bergamot = { workspace = true, optional = true }
 marian-core.workspace = true
+marian-cpu = { workspace = true, optional = true }
 marian-mlx.workspace = true
 serde.workspace = true
 serde_json.workspace = true

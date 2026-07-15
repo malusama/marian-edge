@@ -3,10 +3,16 @@
 [![CI](https://github.com/malusama/marian-mlx/actions/workflows/ci.yml/badge.svg)](https://github.com/malusama/marian-mlx/actions/workflows/ci.yml)
 [![MIT](https://img.shields.io/badge/service-MIT-blue.svg)](LICENSE)
 
-Local English-to-Chinese translation with a Rust HTTP service. The
-native Apple Silicon runtime executes the Marian model with MLX on the Metal
-GPU. The portable Linux image uses the official Bergamot runtime on CPU,
-including native Ruy/NEON support on ARM64.
+Local English-to-Chinese translation with a Rust HTTP service. On Apple
+Silicon, a Rust inference host drives Metal directly through `objc2-metal` and
+runtime-compiles embedded MSL compute kernels. It does not link MLX or use a
+C++ inference bridge. Linux and other portable builds use a pure-Rust CPU
+engine with complete Q8 and FP32 Transformer/SSRU graphs, a lexical shortlist,
+and greedy decoding.
+
+The repository name is retained for compatibility. Tokenization, long-text
+segmentation, scheduling, model loading, and both inference hosts are written
+in Rust. The repository no longer contains the former Bergamot/C++ runtime.
 
 [中文说明](README.zh-CN.md)
 
@@ -14,10 +20,11 @@ including native Ruy/NEON support on ARM64.
 
 | Host | Runtime | Compute | Start command |
 |---|---|---|---|
-| Apple Silicon Mac, macOS 14+ | native bundle | MLX / Metal GPU | one-line installer below |
-| Linux AMD64 | container | Bergamot / CPU | `docker compose up -d` |
-| Linux ARM64 | container | Bergamot / Ruy + NEON CPU | `docker compose up -d` |
-| Docker Desktop on a Mac | Linux ARM container | CPU, **not Metal** | `docker compose up -d` |
+| Apple Silicon Mac, macOS 14+ | native single executable | direct Metal GPU | one-line installer below |
+| Linux AMD64 | container | pure-Rust Q8 CPU | `docker compose up -d` |
+| Linux ARM64 | container | pure-Rust Q8 CPU | `docker compose up -d` |
+| Docker Desktop on a Mac | Linux ARM container | pure-Rust Q8 CPU, **not Metal** | `docker compose up -d` |
+| macOS or Linux source build | native executable | pure-Rust Q8 or FP32 CPU | `--features cpu -- --backend cpu` |
 
 Docker cannot pass the macOS Metal device into its Linux VM. Use the native
 installer when Apple GPU inference is the goal.
@@ -39,6 +46,10 @@ curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/malusama/marian-mlx/v0.1.1/scripts/install-macos.sh | \
   MARIAN_MLX_VERSION=v0.1.1 sh
 ```
+
+`v0.1.1` is retained as a historical, reproducible release, but it predates
+the direct Metal migration and still uses MLX. Pin the first newer tag that
+contains this migration when one is published.
 
 You can inspect the script before running it. First install needs about 750 MB
 of free space and takes longer because
@@ -79,18 +90,17 @@ model bytes: on first start it downloads the pinned `en -> zh` release directly
 from Mozilla storage into the named volume and verifies compressed and
 uncompressed SHA-256 values. Later starts reuse the volume.
 
-CPU translation uses one worker by default. One worker still batches concurrent
-HTTP requests and kept peak memory near 0.4-0.5 GB in our ARM64 model smoke
-test. If the host has spare memory and sustained parallel traffic, try two
-workers and measure again; the same test reached about 0.7-0.8 GB because each
-active worker owns another model workspace.
+The CPU model has one owner, so changing the compute-thread count does not load
+extra model replicas. Concurrent HTTP requests are still micro-batched before
+inference. `MARIAN_MLX_CPU_THREADS` accepts 1, 2, or 4 and controls both FP32
+matrix multiplication and the Q8 rten/exact-AVX2 row-parallel kernels:
 
 ```sh
 MARIAN_MLX_CPU_THREADS=2 docker compose up -d
 ```
 
-Start with one worker on small ARM devices, NAS hosts, and Docker Desktop. More
-workers are a throughput-versus-memory setting, not a generally faster default.
+The model remains single-owner at every setting. Measure the actual host and
+traffic before increasing its internal compute parallelism.
 
 ## Immersive Translate
 
@@ -141,16 +151,19 @@ curl -fsS http://127.0.0.1:3000/translate \
 
 Region variants such as `en-US`, `en_US`, `zh-CN`, and `zh-Hans` are normalized
 to `en` and `zh`. The current release supports only English to Chinese.
-`max_output_tokens` is supported by MLX; Bergamot uses the model's fixed
-`max-length-factor` and rejects non-default values.
+`max_output_tokens` is supported by both the direct Metal and pure-Rust CPU
+backends.
 
 ## Current scope
 
 | Capability | Status |
 |---|---|
-| macOS Apple Silicon / MLX v0.32 / Metal | supported; checked with a Metal trace |
-| Linux AMD64 / Bergamot int8 CPU | supported |
-| Linux ARM64 / Bergamot Ruy + NEON CPU | supported; tested on ARM64 |
+| macOS Apple Silicon / direct Metal FP32 | supported |
+| Linux AMD64 / pure-Rust Q8 CPU | supported |
+| Linux ARM64 / pure-Rust Q8 CPU | supported; tested on ARM64 |
+| portable pure-Rust FP32 CPU | supported with an FP32 manifest |
+| pure-Rust Q8 Transformer/SSRU graph | supported; dense weights stay quantized |
+| pure-Rust SentencePiece and long-text segmentation | supported |
 | English-to-Chinese `base-memory` model | supported |
 | Transformer encoder + SSRU greedy decoder + shortlist | supported |
 | bounded admission and shape-aware micro-batching | supported |
@@ -158,8 +171,17 @@ to `en` and `zh`. The current release supports only English to Chinese.
 | beam search greater than one | not yet; this release uses beam 1 |
 | general language detection | not included |
 
-Each `/imme` list item is one input sequence. The MLX source limit is 4,096
-tokens; paragraph-level sentence splitting is not yet implemented.
+Each `/imme` list item remains one output item. The Metal source limit is 4,096
+tokens. The CPU engine keeps each inference chunk within 255 source pieces plus
+EOS and a bounded padded-attention budget because encoder attention is
+quadratic. Longer text is split at tokenizer-aware sentence boundaries and
+reassembled in order while preserving separators, including newlines.
+
+The Q8 backend matches all five release golden translations exactly. On a
+200-item differential corpus it matched the retired CPU reference exactly on
+164 items; near-tie token choices account for the remaining differences, so
+this is not a claim of bit-for-bit output equivalence. Tested repeated
+80-sentence input and newline cases matched the retired long-text baseline.
 
 ## Architecture
 
@@ -178,14 +200,16 @@ many HTTP requests
         v
  one backend-owner OS thread
         |
-        +--> MLX graph --> Metal command queue       (native macOS)
+        +--> Rust host --> embedded MSL --> Metal GPU (native macOS)
         |
-        +--> persistent Bergamot worker --> Ruy CPU  (Linux container)
+        +--> pure Rust Transformer/SSRU --> Q8/FP32 CPU (portable)
 ```
 
-Backend state stays on one owner thread. The Bergamot process uses a small
-length-prefixed protocol and is reused across requests. See
-[architecture and maintenance](docs/ARCHITECTURE.md).
+Backend state stays on one owner thread. CPU dense operations retain Q8 weights
+or use FP32 weights according to the model manifest. See [architecture and
+maintenance](docs/ARCHITECTURE.md).
+Measured M1-first follow-up work is tracked in the
+[optimization roadmap](docs/OPTIMIZATION_ROADMAP.md).
 
 ## Build from source
 
@@ -198,30 +222,48 @@ cargo run -p marian-server -- --backend echo
 
 The echo backend is development-only and is never an automatic fallback.
 
-Native Apple GPU prerequisites are Xcode with the Metal toolchain, CMake 3.25+,
-Rust 1.86, and `uv`:
+The portable pure-Rust CPU backend selects Q8 or FP32 from the model manifest.
+Linux `auto` and the published `:cpu` image use this backend; the native Metal
+path uses the converted FP32 model.
 
 ```sh
-xcodebuild -downloadComponent MetalToolchain
-git submodule update --init --recursive
-scripts/build-mlx.sh
 scripts/prepare-enzh-model.sh
-scripts/build-release.sh
-MARIAN_MLX_METALLIB="$PWD/build/mlx-install/lib/mlx.metallib" \
-  target/release/marian-mlx-server --backend mlx --model-dir models/enzh
+cargo build --locked --release -p marian-server --features cpu
+target/release/marian-mlx-server --backend cpu --cpu-threads 4 \
+  --model-dir models/enzh
 ```
 
-The scripts pin Python and converter package versions, and verify the MLX CMake
-dependencies and model artifacts with SHA-256. Models, converted weights,
-caches, and build output stay out of Git.
+`--backend cpu-q8`, `--backend cpu-fp32`, and `--backend rust` are compatibility
+aliases for `cpu`; the manifest still determines Q8 versus FP32. The compute
+thread count is fixed before inference starts.
+
+Native Apple GPU prerequisites are the macOS SDK/Command Line Tools, Rust 1.86,
+and `uv`:
+
+```sh
+scripts/prepare-enzh-model.sh
+cargo build --locked --release -p marian-server --features metal
+target/release/marian-mlx-server --backend metal --model-dir models/enzh
+```
+
+`mlx` remains accepted as a feature and backend alias for existing automation,
+but it selects the same direct Metal implementation. MSL source is embedded in
+the executable and compiled through the Metal framework at process startup, so
+there is no `libmlx.dylib`, external `.metallib`, MLX submodule, or
+`scripts/build-mlx.sh` step. Native releases ship one executable; the model
+directory remains a separately downloaded operator artifact.
+
+The model preparation script pins Python and converter package versions and
+verifies model artifacts with SHA-256. Models, converted weights, caches, and
+build output stay out of Git.
 
 ## Performance
 
-On the recorded M1 short-sentence workload, the FP32 MLX runtime reached
-536.04 requests/s at concurrency 32 versus 95.61 requests/s for the default
-one-worker Bergamot int8 container. Instruments captured Metal command
-execution. This is one machine and one request shape, not a universal claim; see
-[the full methodology](docs/BENCHMARKS.md).
+The previously published M1 numbers measured the retired MLX backend and must
+not be read as direct Metal results. The new backend needs a fresh parity,
+throughput, latency, memory, and Metal-trace run before a current performance
+claim is published. The historical baseline and required methodology are in
+[the benchmark notes](docs/BENCHMARKS.md).
 
 ## Security, maintenance, and licensing
 
@@ -232,10 +274,11 @@ network. Operational commands and health semantics are in
 [CONTRIBUTING.md](CONTRIBUTING.md); private reports follow
 [SECURITY.md](SECURITY.md).
 
-The service is MIT licensed. MLX is MIT. The Docker CPU backend uses
-the official MPL-2.0 Bergamot source at a pinned revision. Model files are not
-redistributed by this project; operator-triggered scripts fetch them from the
-upstream registry. See [third-party notices](THIRD_PARTY_NOTICES.md).
+The Rust service and project MSL kernels are MIT licensed. Pure-Rust
+SentencePiece inference is provided by the Apache-2.0 `sentencepiece-rust`
+crate. CPU kernels use Rust crates recorded in `Cargo.lock`. Model files are
+not redistributed by this project; operator-triggered scripts fetch them from
+the upstream registry. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
 Firefox and Mozilla are trademarks of the Mozilla Foundation in the United
 States and other countries.

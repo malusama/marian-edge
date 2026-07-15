@@ -14,14 +14,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          submodules: recursive
-      - name: Select Xcode 16.4
-        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
-      - name: Ensure Metal compiler is available
-        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
       - name: Portable release gates
         run: make check
       - name: Check tag version
@@ -44,7 +38,6 @@ jobs:
         run: |
           VERSION=${VERSION#v}
           export VERSION
-          scripts/build-mlx.sh
           scripts/package-macos.sh
           cp scripts/install-macos.sh dist/install-macos.sh
           (cd dist && shasum -a 256 install-macos.sh >> SHA256SUMS)

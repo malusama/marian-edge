@@ -8,7 +8,7 @@ use marian_core::BackendError;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ModelManifest {
     pub format: String,
     pub model_id: String,
@@ -24,7 +24,7 @@ pub struct ModelManifest {
     pub checksums: Checksums,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Architecture {
     pub model_dim: usize,
     pub attention_heads: usize,
@@ -38,7 +38,7 @@ pub struct Architecture {
     pub max_length_factor: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Checksums {
     pub weights_sha256: String,
     pub source_vocab_sha256: String,
@@ -55,27 +55,7 @@ impl ModelManifest {
         })?;
         let manifest: Self = serde_json::from_slice(&bytes)
             .map_err(|error| BackendError::Model(format!("invalid {}: {error}", path.display())))?;
-        if manifest.format != "marian-mlx.transformer-ssru.v1" {
-            return Err(BackendError::Model(format!(
-                "unsupported model format {}",
-                manifest.format
-            )));
-        }
-        let a = &manifest.architecture;
-        if (
-            a.model_dim,
-            a.attention_heads,
-            a.encoder_layers,
-            a.decoder_layers,
-            a.ffn_dim,
-        ) != (384, 8, 6, 4, 1536)
-            || a.eos_id != 0
-            || a.unk_id != 1
-        {
-            return Err(BackendError::Model(
-                "this release supports the 384d/6e/4d SSRU graph only".into(),
-            ));
-        }
+        manifest.validate()?;
         Ok(manifest)
     }
 
@@ -105,6 +85,40 @@ impl ModelManifest {
                 ));
             }
             (None, None) => {}
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), BackendError> {
+        if self.format != "marian-mlx.transformer-ssru.v1" {
+            return Err(BackendError::Model(format!(
+                "unsupported model format {}",
+                self.format
+            )));
+        }
+        if !matches!(self.precision.as_str(), "fp32" | "q8") {
+            return Err(BackendError::Model(format!(
+                "unsupported model precision {}; expected fp32 or q8",
+                self.precision
+            )));
+        }
+        let architecture = &self.architecture;
+        if (
+            architecture.model_dim,
+            architecture.attention_heads,
+            architecture.encoder_layers,
+            architecture.decoder_layers,
+            architecture.ffn_dim,
+        ) != (384, 8, 6, 4, 1536)
+            || architecture.eos_id != 0
+            || architecture.unk_id != 1
+            || architecture.source_vocab_size <= 2
+            || architecture.target_vocab_size <= 2
+            || !(1..=8).contains(&architecture.max_length_factor)
+        {
+            return Err(BackendError::Model(
+                "this release supports the 384d/6e/4d SSRU graph only".into(),
+            ));
         }
         Ok(())
     }
@@ -148,6 +162,59 @@ mod tests {
 
     use super::*;
 
+    fn manifest(precision: &str, max_length_factor: usize) -> ModelManifest {
+        ModelManifest {
+            format: "marian-mlx.transformer-ssru.v1".into(),
+            model_id: "test".into(),
+            source_lang: "en".into(),
+            target_lang: "zh".into(),
+            weights: "model.safetensors".into(),
+            source_vocab: "source.spm".into(),
+            target_vocab: "target.spm".into(),
+            shortlist: None,
+            precision: precision.into(),
+            architecture: Architecture {
+                model_dim: 384,
+                attention_heads: 8,
+                encoder_layers: 6,
+                decoder_layers: 4,
+                ffn_dim: 1536,
+                source_vocab_size: 32_000,
+                target_vocab_size: 32_000,
+                eos_id: 0,
+                unk_id: 1,
+                max_length_factor,
+            },
+            checksums: Checksums {
+                weights_sha256: String::new(),
+                source_vocab_sha256: String::new(),
+                target_vocab_sha256: String::new(),
+                shortlist_sha256: None,
+            },
+        }
+    }
+
+    #[test]
+    fn supported_precisions_and_bounded_length_factor_are_enforced() {
+        assert!(manifest("fp32", 1).validate().is_ok());
+        assert!(manifest("fp32", 8).validate().is_ok());
+        assert!(manifest("q8", 3).validate().is_ok());
+        assert!(manifest("fp16", 3).validate().is_err());
+        assert!(manifest("fp32", 0).validate().is_err());
+        assert!(manifest("fp32", 9).validate().is_err());
+    }
+
+    #[test]
+    fn vocabularies_must_contain_required_special_tokens() {
+        let mut value = manifest("fp32", 3);
+        value.architecture.source_vocab_size = 2;
+        assert!(value.validate().is_err());
+
+        let mut value = manifest("fp32", 3);
+        value.architecture.target_vocab_size = 2;
+        assert!(value.validate().is_err());
+    }
+
     #[test]
     fn runtime_file_hashes_are_enforced() {
         let unique = SystemTime::now()
@@ -155,7 +222,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "marian-mlx-manifest-{}-{unique}",
+            "marian-model-manifest-{}-{unique}",
             std::process::id()
         ));
         fs::write(&path, b"abc").unwrap();

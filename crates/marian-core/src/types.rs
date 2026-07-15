@@ -77,6 +77,6 @@ pub enum TranslateError {
     Timeout(Duration),
     #[error(transparent)]
     Backend(#[from] BackendError),
-    #[error("GPU worker stopped unexpectedly")]
+    #[error("inference worker stopped unexpectedly")]
     WorkerStopped,
 }

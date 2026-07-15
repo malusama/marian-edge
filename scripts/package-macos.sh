@@ -24,11 +24,9 @@ printf '%s\n' "$VERSION" | grep -Eq \
 
 "$ROOT/scripts/build-release.sh"
 rm -rf "$BUNDLE"
-mkdir -p "$BUNDLE/scripts" "$BUNDLE/tools" "$BUNDLE/licenses" \
+mkdir -p "$BUNDLE/scripts" "$BUNDLE/tools" \
   "$BUNDLE/packaging/launchd"
 install -m 0755 "$ROOT/target/release/marian-mlx-server" "$BUNDLE/marian-mlx-server"
-install -m 0755 "$ROOT/build/mlx-install/lib/libmlx.dylib" "$BUNDLE/libmlx.dylib"
-install -m 0644 "$ROOT/build/mlx-install/lib/mlx.metallib" "$BUNDLE/mlx.metallib"
 install -m 0755 "$ROOT/scripts/prepare-enzh-model.sh" "$BUNDLE/scripts/prepare-enzh-model.sh"
 install -m 0755 "$ROOT/scripts/marian-mlxctl" "$BUNDLE/scripts/marian-mlxctl"
 install -m 0755 "$ROOT/scripts/uninstall-macos.sh" "$BUNDLE/scripts/uninstall-macos.sh"
@@ -37,9 +35,8 @@ install -m 0644 \
   "$ROOT/packaging/launchd/io.github.malusama.marian-mlx.plist" \
   "$BUNDLE/packaging/launchd/io.github.malusama.marian-mlx.plist"
 install -m 0644 "$ROOT/LICENSE" "$BUNDLE/LICENSE"
+install -m 0644 "$ROOT/LICENSE-APACHE-2.0" "$BUNDLE/LICENSE-APACHE-2.0"
 install -m 0644 "$ROOT/THIRD_PARTY_NOTICES.md" "$BUNDLE/THIRD_PARTY_NOTICES.md"
-install -m 0644 "$ROOT/third_party/mlx/LICENSE" "$BUNDLE/licenses/MLX-LICENSE"
-install -m 0644 "$ROOT/third_party/mlx/ACKNOWLEDGMENTS.md" "$BUNDLE/licenses/MLX-ACKNOWLEDGMENTS.md"
 printf '%s\n' "$VERSION" > "$BUNDLE/VERSION"
 
 if [ "$(file -b "$BUNDLE/marian-mlx-server")" = "" ] || \
@@ -47,32 +44,33 @@ if [ "$(file -b "$BUNDLE/marian-mlx-server")" = "" ] || \
   echo "release executable is not arm64" >&2
   exit 1
 fi
-if ! file "$BUNDLE/libmlx.dylib" | grep -q 'arm64'; then
-  echo "MLX library is not arm64" >&2
+DYNAMIC_DEPENDENCIES=$(otool -L "$BUNDLE/marian-mlx-server" | awk 'NR > 1 {print $1}')
+if printf '%s\n' "$DYNAMIC_DEPENDENCIES" | \
+   grep -Ev '^(/usr/lib/|/System/Library/)' | grep -q .; then
+  echo "release executable has a non-system dynamic dependency" >&2
   exit 1
 fi
-[ -s "$BUNDLE/mlx.metallib" ] || {
-  echo "Metal library is empty" >&2
+if printf '%s\n' "$DYNAMIC_DEPENDENCIES" | \
+   grep -Eiq '(^|/)(libc\+\+|libstdc\+\+|libsentencepiece)([^/]*)$'; then
+  echo "direct Metal release must not link a C++ runtime or native SentencePiece" >&2
   exit 1
-}
-otool -L "$BUNDLE/marian-mlx-server" | grep -q '@rpath/libmlx.dylib'
-RPATHS=$(otool -l "$BUNDLE/marian-mlx-server" | awk '
-  $1 == "cmd" && $2 == "LC_RPATH" {getline; getline; print $2}
-')
-[ "$RPATHS" = "@executable_path" ] || {
-  echo "release executable must use only @executable_path for MLX" >&2
+fi
+if find "$BUNDLE" \( -name '*.dylib' -o -name '*.metallib' \) -print -quit | grep -q .; then
+  echo "direct Metal release must not contain bundled dylib or metallib files" >&2
   exit 1
-}
+fi
+if find "$BUNDLE" \( -iname '*sentencepiece*' -o -iname 'libtokenizer*.so' -o \
+   -iname 'libtokenizer*.dylib' -o -iname 'libtokenizer*.a' \) \
+   -print -quit | grep -q .; then
+  echo "direct Metal release must not contain a bundled native tokenizer" >&2
+  exit 1
+fi
 
 # CI uses ad-hoc signing. Release builders may provide a Developer ID identity.
 CODESIGN_IDENTITY=${CODESIGN_IDENTITY:--}
-codesign --force --sign "$CODESIGN_IDENTITY" "$BUNDLE/libmlx.dylib"
 codesign --force --sign "$CODESIGN_IDENTITY" "$BUNDLE/marian-mlx-server"
-codesign --verify --strict "$BUNDLE/libmlx.dylib"
 codesign --verify --strict "$BUNDLE/marian-mlx-server"
-if strings "$BUNDLE/marian-mlx-server" "$BUNDLE/libmlx.dylib" \
-   "$BUNDLE/mlx.metallib" | \
-   grep -E '/Users/|/home/runner/' >/dev/null; then
+if strings "$BUNDLE/marian-mlx-server" | grep -E '/Users/|/home/runner/' >/dev/null; then
   echo "release bundle contains a developer-machine path" >&2
   exit 1
 fi
@@ -92,4 +90,3 @@ COPYFILE_DISABLE=1 tar -C "$DIST" -czf "$ARCHIVE" "$(basename "$BUNDLE")"
 
 echo "Bundle written to $BUNDLE"
 echo "Archive written to $ARCHIVE"
-echo "Run with MARIAN_MLX_METALLIB=$BUNDLE/mlx.metallib"

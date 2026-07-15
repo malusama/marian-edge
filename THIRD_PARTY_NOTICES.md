@@ -3,25 +3,24 @@
 The service code in this repository is MIT licensed. The projects and model
 artifacts below retain their own terms.
 
-## MLX
+## Apple Metal
 
-- Project: [ml-explore/mlx](https://github.com/ml-explore/mlx)
-- Pinned revision: `7a1d4f5c12ac82f4b4d0a6e71538d89ca0605247`
-- License: MIT, copyright Apple Inc.
-- Use: native Apple Silicon tensor and Metal runtime
+The native Apple Silicon backend calls the Metal framework supplied by macOS
+directly and compiles the repository's own Metal kernels at runtime. Native
+release archives do not redistribute MLX, a third-party dynamic library, or a
+precompiled Metal library.
 
-MLX is a Git submodule. Native release archives include its license next to
-the executable.
+## SentencePiece
 
-## Bergamot Translator
+- Project: [VoiceLessQ/sentencepiece-rust](https://github.com/VoiceLessQ/sentencepiece-rust)
+- Version: 0.1.1
+- License: Apache License 2.0
+- Use: source and target model tokenization
 
-- Project: [browsermt/bergamot-translator](https://github.com/browsermt/bergamot-translator)
-- License: Mozilla Public License 2.0
-- Use: optional Linux CPU backend in the `:cpu` container image
-
-The container build obtains a pinned source revision directly from the
-upstream repository. The final image includes the MPL-2.0 license and the
-corresponding source revision/URL.
+`marian-tokenizer` wraps this from-scratch Rust implementation of SentencePiece
+inference. It reads the existing `.spm` model format without linking or
+redistributing the native Google SentencePiece library. A verbatim copy of the
+crate's license is distributed as [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
 
 ## Mozilla translation model artifacts
 
@@ -44,4 +43,10 @@ States and other countries.
 
 Rust dependencies and exact versions are recorded in `Cargo.lock`. Each crate
 continues to be governed by the license declared by that crate. CI runs license
-and vulnerability policy checks before releases.
+and vulnerability policy checks before releases. This includes the
+`objc2-metal` bindings used to call Apple's system Metal framework directly,
+`matrixmultiply` used by the pure-Rust FP32 CPU backend, `rten-gemm` 0.21.0 for
+the pure-Rust Q8 linear kernels, and the pure-Rust `sentencepiece-rust`
+inference crate. The long-text segmenter is repository-owned Rust code. MLX,
+Google SentencePiece, and a native inference library are not runtime
+dependencies.

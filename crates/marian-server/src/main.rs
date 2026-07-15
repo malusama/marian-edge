@@ -8,11 +8,13 @@ use marian_server::{AppState, router};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum BackendKind {
     Auto,
-    Mlx,
-    Bergamot,
+    #[value(alias = "mlx")]
+    Metal,
+    #[value(alias = "cpu-fp32", alias = "cpu-q8", alias = "rust")]
+    Cpu,
     Echo,
 }
 
@@ -30,12 +32,10 @@ struct Args {
 
     #[arg(
         long,
-        env = "MARIAN_MLX_BERGAMOT_WORKER",
-        default_value = "/usr/local/bin/marian-mlx-bergamot-worker"
+        env = "MARIAN_MLX_CPU_THREADS",
+        default_value_t = 1,
+        help = "Pure Rust CPU inference threads: 1, 2, or 4"
     )]
-    bergamot_worker: PathBuf,
-
-    #[arg(long, env = "MARIAN_MLX_CPU_THREADS", default_value_t = 1)]
     cpu_threads: usize,
 
     #[arg(long, env = "MARIAN_MLX_QUEUE_CAPACITY", default_value_t = 256)]
@@ -64,9 +64,17 @@ struct Args {
     json_logs: bool,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
+    configure_cpu_threads(&args)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to create Tokio runtime")?;
+    runtime.block_on(run(args))
+}
+
+async fn run(args: Args) -> Result<()> {
     init_tracing(args.json_logs);
     let config = SchedulerConfig {
         queue_capacity: args.queue_capacity,
@@ -77,13 +85,7 @@ async fn main() -> Result<()> {
         ..SchedulerConfig::default()
     };
 
-    let translator = create_translator(
-        args.backend,
-        args.model_dir,
-        args.bergamot_worker,
-        args.cpu_threads,
-        config,
-    )?;
+    let translator = create_translator(args.backend, args.model_dir, config)?;
     let state = AppState::new(translator.clone());
     let app = router(state, args.cors_origin);
     let listener = tokio::net::TcpListener::bind(args.bind)
@@ -105,67 +107,89 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn configure_cpu_threads(args: &Args) -> Result<()> {
+    let auto_uses_cpu = cfg!(feature = "cpu")
+        && !cfg!(all(
+            target_os = "macos",
+            target_arch = "aarch64",
+            feature = "metal"
+        ));
+    if !(matches!(args.backend, BackendKind::Cpu)
+        || matches!(args.backend, BackendKind::Auto) && auto_uses_cpu)
+    {
+        return Ok(());
+    }
+    if !matches!(args.cpu_threads, 1 | 2 | 4) {
+        anyhow::bail!("pure Rust cpu_threads must be 1, 2, or 4");
+    }
+
+    // SAFETY: this runs at the very start of `main`, before the Tokio runtime,
+    // backend owner, matrixmultiply workers, or Rayon global pool are created.
+    // Both CPU executors read these process-wide settings on first use.
+    unsafe {
+        std::env::set_var("MATMUL_NUM_THREADS", args.cpu_threads.to_string());
+        std::env::set_var("RAYON_NUM_THREADS", args.cpu_threads.to_string());
+    }
+    Ok(())
+}
+
 fn create_translator(
     backend: BackendKind,
     model_dir: PathBuf,
-    bergamot_worker: PathBuf,
-    cpu_threads: usize,
     config: SchedulerConfig,
 ) -> Result<Translator> {
     match backend {
         BackendKind::Echo => Translator::start(config, || Ok(EchoBackend)).map_err(Into::into),
         BackendKind::Auto => {
-            #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "mlx"))]
+            #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
             {
-                let _ = (bergamot_worker, cpu_threads);
-                Translator::start(config, move || marian_mlx::MlxBackend::load(model_dir))
+                Translator::start(config, move || marian_mlx::MetalBackend::load(model_dir))
                     .map_err(Into::into)
             }
-            #[cfg(all(target_os = "linux", feature = "bergamot"))]
+            #[cfg(all(
+                feature = "cpu",
+                not(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))
+            ))]
             {
-                return Translator::start(config, move || {
-                    marian_bergamot::BergamotBackend::load(model_dir, bergamot_worker, cpu_threads)
-                })
-                .map_err(Into::into);
+                Translator::start(config, move || marian_cpu::CpuModelBackend::load(model_dir))
+                    .map_err(Into::into)
             }
             #[cfg(not(any(
-                all(target_os = "macos", target_arch = "aarch64", feature = "mlx"),
-                all(target_os = "linux", feature = "bergamot")
+                all(target_os = "macos", target_arch = "aarch64", feature = "metal"),
+                feature = "cpu"
             )))]
-            {
-                let _ = (model_dir, bergamot_worker, cpu_threads);
-                anyhow::bail!(
-                    "no production backend is compiled for this platform; enable `mlx` on Apple Silicon macOS or `bergamot` on Linux"
-                )
-            }
-        }
-        BackendKind::Mlx => {
-            #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "mlx"))]
-            {
-                Translator::start(config, move || marian_mlx::MlxBackend::load(model_dir))
-                    .map_err(Into::into)
-            }
-            #[cfg(not(all(target_os = "macos", target_arch = "aarch64", feature = "mlx")))]
             {
                 let _ = model_dir;
                 anyhow::bail!(
-                    "MLX backend is not in this binary; build on Apple Silicon with `cargo build --release --features mlx` (use --backend echo only for API testing)"
+                    "no production backend is compiled for this platform; enable `metal` on Apple Silicon macOS or `cpu` on any supported platform"
                 )
             }
         }
-        BackendKind::Bergamot => {
-            #[cfg(all(target_os = "linux", feature = "bergamot"))]
+        BackendKind::Metal => {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
             {
-                Translator::start(config, move || {
-                    marian_bergamot::BergamotBackend::load(model_dir, bergamot_worker, cpu_threads)
-                })
-                .map_err(Into::into)
+                Translator::start(config, move || marian_mlx::MetalBackend::load(model_dir))
+                    .map_err(Into::into)
             }
-            #[cfg(not(all(target_os = "linux", feature = "bergamot")))]
+            #[cfg(not(all(target_os = "macos", target_arch = "aarch64", feature = "metal")))]
             {
-                let _ = (model_dir, bergamot_worker, cpu_threads);
+                let _ = model_dir;
                 anyhow::bail!(
-                    "Bergamot backend is not in this binary; build on Linux with `cargo build --release --features bergamot`"
+                    "Metal backend is not in this binary; build on Apple Silicon with `cargo build --release --features metal` (use --backend echo only for API testing)"
+                )
+            }
+        }
+        BackendKind::Cpu => {
+            #[cfg(feature = "cpu")]
+            {
+                Translator::start(config, move || marian_cpu::CpuModelBackend::load(model_dir))
+                    .map_err(Into::into)
+            }
+            #[cfg(not(feature = "cpu"))]
+            {
+                let _ = model_dir;
+                anyhow::bail!(
+                    "pure Rust CPU backend is not in this binary; build with `cargo build --release -p marian-server --features cpu`"
                 )
             }
         }
@@ -205,5 +229,23 @@ async fn shutdown_signal() {
     tokio::select! {
         () = ctrl_c => {},
         () = terminate => {},
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Args, BackendKind};
+
+    #[test]
+    fn backend_aliases_are_stable_and_bergamot_is_gone() {
+        for alias in ["cpu", "cpu-fp32", "cpu-q8", "rust"] {
+            let args = Args::try_parse_from(["marian-mlx-server", "--backend", alias]).unwrap();
+            assert_eq!(args.backend, BackendKind::Cpu);
+        }
+        let args = Args::try_parse_from(["marian-mlx-server", "--backend", "mlx"]).unwrap();
+        assert_eq!(args.backend, BackendKind::Metal);
+        assert!(Args::try_parse_from(["marian-mlx-server", "--backend", "bergamot"]).is_err());
     }
 }

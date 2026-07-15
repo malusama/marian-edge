@@ -16,7 +16,7 @@ body:
     id: backend
     attributes:
       label: Backend
-      options: [MLX / Metal, Bergamot / CPU, API-only development]
+      options: [Rust / Metal FP32, Rust / Q8 CPU, Rust / FP32 CPU, API-only development]
     validations:
       required: true
   - type: textarea

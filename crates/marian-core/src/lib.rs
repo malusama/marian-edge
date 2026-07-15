@@ -1,7 +1,7 @@
 //! Runtime-independent translation types and a bounded dynamic-batch scheduler.
 //!
 //! The scheduler deliberately owns a backend on one dedicated OS thread. That
-//! gives Metal/MLX a single command-queue owner while Tokio remains free to
+//! gives direct Metal a single command-queue owner while Tokio remains free to
 //! serve many concurrent HTTP requests.
 
 mod backend;

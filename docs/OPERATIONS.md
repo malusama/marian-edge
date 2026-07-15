@@ -6,6 +6,11 @@ The installer creates a per-user LaunchAgent named
 `io.github.malusama.marian-mlx`. It binds to `127.0.0.1:3000` by default and
 stores data under `~/.local/share/marian-mlx`.
 
+The native release payload is one server executable. Its MSL source is embedded
+and compiled through the system Metal framework when the process starts; there
+is no adjacent `libmlx.dylib` or `.metallib` to install or verify. The model
+directory is still managed separately.
+
 ```sh
 # Process and launchd state
 launchctl print "gui/$(id -u)/io.github.malusama.marian-mlx"
@@ -46,35 +51,30 @@ docker compose down
 ```
 
 The named volume keeps the operator-downloaded model across container updates.
-The image is Linux CPU-only on both Intel and ARM hosts. Docker Desktop cannot
-pass the macOS Metal device into a Linux container; use the native installer
-for Apple GPU inference.
+The image is Linux CPU-only on both Intel and ARM hosts and runs the pure-Rust
+Q8 backend. Docker Desktop cannot pass the macOS Metal device into a Linux
+container; use the native installer for Apple GPU inference.
 
-### CPU worker sizing
+### CPU ownership and compute threads
 
-Compose defaults `MARIAN_MLX_CPU_THREADS` to `1`. A single worker still receives the
-micro-batches formed from concurrent HTTP requests, and is the safest setting
-for small ARM systems, NAS hosts, and Docker Desktop.
+The CPU model has one owner. Concurrent HTTP requests still benefit from the
+scheduler's micro-batching, and changing `MARIAN_MLX_CPU_THREADS` does not
+create extra model replicas or workers. The setting accepts 1, 2, or 4 and is
+applied at startup to both `MATMUL_NUM_THREADS` and `RAYON_NUM_THREADS`: it
+controls FP32 matrix multiplication as well as Q8 rten/exact-AVX2 row
+parallelism.
 
-In an ARM64 smoke test with the released `base-memory` model, observed peak RSS
-was about 0.4-0.5 GB with one active worker and 0.7-0.8 GB with two. Replicas
-load lazily, so memory can rise only after concurrency reaches a newly enabled
-worker. Exact usage depends on text length, batch shape, architecture, and the
-configured model workspace.
-
-To test two workers:
+Raise the value one step at a time, recreate the container, warm the model with
+representative traffic, and compare throughput, tail latency, CPU utilization,
+and peak RSS:
 
 ```sh
 MARIAN_MLX_CPU_THREADS=2 docker compose up -d --force-recreate
 docker stats
 ```
 
-Give a one-worker container at least 768 MiB before adding a tight memory
-limit; allow at least 1 GiB when trying two. Raise the value one step at a time,
-warm every worker with representative traffic, and compare throughput, tail
-latency, and peak RSS. Revert to one if memory pressure, swapping, or OOM kills
-appear. Values above two are intended for measured high-throughput deployments,
-not routine local use.
+Exact scaling depends on text length, batch shape, architecture, precision,
+and model workspace; do not apply sizing numbers from the retired CPU runtime.
 
 ## Health contract
 
@@ -97,8 +97,14 @@ not routine local use.
   load.
 - `422`: invalid/unsupported direction; the current release supports only
   English to Chinese.
-- startup fails closed: inspect the error log for a missing model, checksum,
-  architecture, MLX library, or Metal library.
+- startup fails closed: inspect the error log for a missing model, checksum or
+  precision/architecture mismatch, SentencePiece vocabulary error, Q8 tensor
+  validation error, unavailable Metal device, MSL compilation failure, or
+  compute-pipeline creation failure.
+
+The CPU backend segments long paragraphs before inference and preserves their
+separator order. If a long request times out, inspect total input size and host
+load; the per-chunk shape and work limits still apply even after segmentation.
 
 Keep the listener on loopback unless a separate authenticated TLS proxy is in
 front of it. The application itself is not an internet-facing gateway.

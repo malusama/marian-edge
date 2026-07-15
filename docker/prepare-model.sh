@@ -9,6 +9,7 @@ flock -x -w 1800 9 || {
   echo "marian-mlx: timed out waiting for the model preparation lock" >&2
   exit 1
 }
+rm -f "$MODEL_DIR/bergamot.yml" "$MODEL_DIR/bergamot.yml.part"
 
 verify() {
   expected=$1
@@ -45,11 +46,18 @@ download_gzip() {
   rm -f "$destination.gz.part"
 }
 
+MODEL_SHA256=4e5accc141373565ddc8fa1565bceaa8d0c3482a82cab8131c719ebcc6c2157c
+LEGACY_MODEL="$MODEL_DIR/model.enzh.intgemm.alphas.bin"
+if ! verify "$MODEL_SHA256" "$MODEL_DIR/model.q8.bin" && \
+    verify "$MODEL_SHA256" "$LEGACY_MODEL"; then
+  mv "$LEGACY_MODEL" "$MODEL_DIR/model.q8.bin"
+fi
+
 download_gzip \
   model.enzh.intgemm.alphas.bin.gz \
   7f255403b3bb2502f08ac4d5ca397a8a5a13f899d2f2e987a4934e089d241d16 \
-  model.enzh.intgemm.alphas.bin \
-  4e5accc141373565ddc8fa1565bceaa8d0c3482a82cab8131c719ebcc6c2157c
+  model.q8.bin \
+  "$MODEL_SHA256"
 download_gzip \
   srcvocab.enzh.spm.gz \
   7846e3c236388390f4e5d321f8413d67f34c1bab5f066165eeb673bfd07607cc \
@@ -66,27 +74,38 @@ download_gzip \
   shortlist.bin \
   8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681
 
-CONFIG="$MODEL_DIR/bergamot.yml"
-cat > "$CONFIG.part" <<EOF
-models:
-  - $MODEL_DIR/model.enzh.intgemm.alphas.bin
-vocabs:
-  - $MODEL_DIR/source.spm
-  - $MODEL_DIR/target.spm
-shortlist:
-  - $MODEL_DIR/shortlist.bin
-  - false
-beam-size: 1
-normalize: 1.0
-word-penalty: 0
-max-length-break: 128
-mini-batch-words: 1024
-workspace: 128
-max-length-factor: 2.0
-skip-cost: true
-quiet: true
-quiet-translation: true
-gemm-precision: int8shiftAlphaAll
-alignment: soft
+rm -f "$LEGACY_MODEL" "$LEGACY_MODEL.part" "$LEGACY_MODEL.gz.part"
+
+MANIFEST="$MODEL_DIR/manifest.json"
+cat > "$MANIFEST.part" <<EOF
+{
+  "format": "marian-mlx.transformer-ssru.v1",
+  "model_id": "mozilla-firefox-translations-en-zh-base-memory",
+  "source_lang": "en",
+  "target_lang": "zh",
+  "weights": "model.q8.bin",
+  "source_vocab": "source.spm",
+  "target_vocab": "target.spm",
+  "shortlist": "shortlist.bin",
+  "precision": "q8",
+  "architecture": {
+    "model_dim": 384,
+    "attention_heads": 8,
+    "encoder_layers": 6,
+    "decoder_layers": 4,
+    "ffn_dim": 1536,
+    "source_vocab_size": 32000,
+    "target_vocab_size": 32000,
+    "eos_id": 0,
+    "unk_id": 1,
+    "max_length_factor": 2
+  },
+  "checksums": {
+    "weights_sha256": "$MODEL_SHA256",
+    "source_vocab_sha256": "bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5",
+    "target_vocab_sha256": "aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d",
+    "shortlist_sha256": "8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681"
+  }
+}
 EOF
-mv "$CONFIG.part" "$CONFIG"
+mv "$MANIFEST.part" "$MANIFEST"

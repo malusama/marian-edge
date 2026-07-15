@@ -1,8 +1,12 @@
 # Marian MLX
 
-一个本地英译中服务。HTTP 与并发调度层使用 Rust；Apple
-Silicon 原生版通过 MLX/Metal 在 Mac GPU 上推理；Linux Docker 版通过官方
-Bergamot 在 CPU 上推理，并原生支持 ARM64 的 Ruy/NEON。
+一个本地英译中服务。Apple Silicon 原生版由 Rust host 通过 `objc2-metal`
+直接驱动 Metal，并在启动时编译内嵌的 MSL compute kernel，不再链接 MLX，
+也没有 C++ 推理桥。Linux Docker 和其他跨平台构建使用纯 Rust CPU 引擎，
+完整支持 Q8 与 FP32 Transformer/SSRU 计算图、词表 shortlist 和贪心解码。
+
+项目名为兼容性继续保留。分词、长文本分段、调度、模型加载和两套推理 host
+都由 Rust 实现；仓库已经删除此前的 Bergamot/C++ runtime。
 
 [English README](README.md)
 
@@ -10,10 +14,11 @@ Bergamot 在 CPU 上推理，并原生支持 ARM64 的 Ruy/NEON。
 
 | 主机 | 运行方式 | 实际计算设备 | 启动方式 |
 |---|---|---|---|
-| Apple Silicon Mac，macOS 14+ | 原生安装 | MLX / Metal GPU | 下方一键安装 |
-| Linux AMD64 | Docker | Bergamot CPU | `docker compose up -d` |
-| Linux ARM64 | Docker | Bergamot Ruy + NEON CPU | `docker compose up -d` |
-| Mac 上的 Docker Desktop | Linux ARM 容器 | **CPU，不是 Metal** | `docker compose up -d` |
+| Apple Silicon Mac，macOS 14+ | 原生单一可执行文件 | 直接使用 Metal GPU | 下方一键安装 |
+| Linux AMD64 | Docker | 纯 Rust Q8 CPU | `docker compose up -d` |
+| Linux ARM64 | Docker | 纯 Rust Q8 CPU | `docker compose up -d` |
+| Mac 上的 Docker Desktop | Linux ARM 容器 | 纯 Rust Q8 CPU，**不是 Metal** | `docker compose up -d` |
+| macOS 或 Linux 源码构建 | 原生可执行文件 | 纯 Rust Q8 或 FP32 CPU | `--features cpu -- --backend cpu` |
 
 Docker 在 Mac 上运行的是 Linux 虚拟机，不能把 macOS Metal GPU 透传给容器。
 想用 Mac GPU，必须安装原生版。
@@ -63,17 +68,16 @@ docker run -d --name marian-mlx --restart unless-stopped \
 时会从 Mozilla 存储直接下载固定的英译中模型，校验压缩前后 SHA-256 后写入
 named volume，后续启动直接复用。
 
-CPU 默认只启用 1 个翻译 worker。即使只有 1 个 worker，并发 HTTP 请求仍会先
-合并成批次；在我们的 ARM64 真模型冒烟测试中，峰值内存约为 0.4-0.5 GB。
-如果机器内存充足且长期有并发流量，可以显式尝试 2 个 worker；同一测试约为
-0.7-0.8 GB，因为每个活跃 worker 都会持有独立的模型工作区。
+CPU 模型由单一 owner 持有，因此增加计算线程不会加载额外模型副本。并发 HTTP
+请求仍会先合并成批次再推理。`MARIAN_MLX_CPU_THREADS` 支持 1、2 或 4，同时
+控制 FP32 矩阵乘法以及 Q8 的 rten/精确 AVX2 row-parallel kernel：
 
 ```sh
 MARIAN_MLX_CPU_THREADS=2 docker compose up -d
 ```
 
-小型 ARM 设备、NAS 和 Docker Desktop 建议从 1 开始。worker 越多并不一定
-越快，它是吞吐量与内存之间的调优项，应以真实请求压测结果为准。
+无论设置几个计算线程，模型都仍只有一个 owner。增加内部计算并行度前应在
+目标机器和真实流量上测量。
 
 ## 沉浸式翻译设置
 
@@ -120,22 +124,34 @@ curl -fsS http://127.0.0.1:3000/translate \
 | `GET /metrics` | Prometheus 指标 |
 
 `en-US`、`en_US`、`zh-CN`、`zh-Hans` 会归一化为 `en` 和 `zh`。当前版本只
-支持英译中。`max_output_tokens` 仅 MLX 后端支持；Bergamot 使用模型固定的
-`max-length-factor`，非默认值会明确报错。
+支持英译中。`max_output_tokens` 可用于 direct Metal 和纯 Rust CPU 后端。
 
 ## 当前支持范围
 
 | 能力 | 状态 |
 |---|---|
-| Apple Silicon / MLX v0.32 / Metal GPU | 支持，已用 Metal Trace 验证 |
-| Linux AMD64 / Bergamot int8 CPU | 支持 |
-| Linux ARM64 / Ruy + NEON CPU | 支持，已在 ARM64 实机测试 |
+| Apple Silicon / direct Metal FP32 | 支持 |
+| Linux AMD64 / 纯 Rust Q8 CPU | 支持 |
+| Linux ARM64 / 纯 Rust Q8 CPU | 支持，已在 ARM64 实机测试 |
+| 跨平台纯 Rust FP32 CPU | 使用 FP32 manifest 时支持 |
+| 纯 Rust Q8 Transformer/SSRU 计算图 | 支持；dense 权重保持量化 |
+| 纯 Rust SentencePiece 与长文本分段 | 支持 |
 | 英译中 `base-memory` 模型 | 支持 |
 | Transformer 编码器、SSRU 贪心解码、词表 shortlist | 支持 |
 | 有界排队、按形状动态 micro-batch | 支持 |
 | 更多语向 | 暂不支持 |
 | beam > 1 | 暂不支持；当前发布模型为 beam 1 |
 | 通用语种识别 | 不包含 |
+
+`/imme` 中每一项仍对应一个输出项。Metal 单条上限为 4096 token。CPU 引擎会
+把每个推理 chunk 控制在 255 个源 piece 加 EOS 以内，并约束 batch 的 padding
+attention 工作量，因为 encoder attention 是平方复杂度。更长的文本会在
+tokenizer 感知的句子边界分段，之后按原顺序拼回并保留包括换行在内的分隔符。
+
+Q8 后端对 5 条 release golden 全部精确一致。在 200 条差分语料中，与已退役
+CPU 参考实现有 164 条输出精确一致；其余多为接近分数下的 token 选择差异，
+因此这里不声称逐 token 完全等价。测试中的 80 句重复长文本与换行样例和已
+退役长文本基线一致。
 
 ## 并发模型
 
@@ -154,17 +170,20 @@ Rust / Axum 校验
       v
 单一后端 owner 线程
       |
-      +--> MLX 图 --> Metal GPU             (Mac 原生)
+      +--> Rust host --> 内嵌 MSL --> Metal GPU (Mac 原生)
       |
-      +--> 常驻 Bergamot worker --> Ruy CPU (Linux Docker)
+      +--> 纯 Rust Transformer/SSRU --> Q8/FP32 CPU（跨平台）
 ```
 
-GPU 状态始终由同一个线程持有；Bergamot worker 会跨请求复用。架构维护说明见
+后端状态始终由同一个 owner 线程持有。CPU dense 计算会根据模型 manifest
+使用保持量化的 Q8 权重或 FP32 权重。架构维护说明见
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+后续以 M1 为优先级的实测优化任务见
+[优化路线图](docs/OPTIMIZATION_ROADMAP.md)。
 
 ## 从源码构建
 
-只检查 Rust 服务层不需要模型或 MLX：
+只检查 Rust 服务层不需要模型或 Metal：
 
 ```sh
 make check
@@ -173,27 +192,42 @@ cargo run -p marian-server -- --backend echo
 
 `echo` 只用于 API 开发，生产后端失败时绝不会静默回退到它。
 
-Mac 原生构建需要 Xcode Metal Toolchain、CMake 3.25+、Rust 1.86 和 `uv`：
+纯 Rust CPU 后端根据模型 manifest 自动选择 Q8 或 FP32。Linux 的 `auto` 和
+已发布的 `:cpu` 镜像使用这个后端；原生 Metal 路径使用转换后的 FP32 模型。
 
 ```sh
-xcodebuild -downloadComponent MetalToolchain
-git submodule update --init --recursive
-scripts/build-mlx.sh
 scripts/prepare-enzh-model.sh
-scripts/build-release.sh
-MARIAN_MLX_METALLIB="$PWD/build/mlx-install/lib/mlx.metallib" \
-  target/release/marian-mlx-server --backend mlx --model-dir models/enzh
+cargo build --locked --release -p marian-server --features cpu
+target/release/marian-mlx-server --backend cpu --cpu-threads 4 \
+  --model-dir models/enzh
 ```
 
-脚本固定 Python 与转换依赖版本，并用 SHA-256 校验 MLX CMake 依赖和模型文件。
-模型、转换后权重、缓存和构建产物不会进入 Git。
+`--backend cpu-q8`、`--backend cpu-fp32` 和 `--backend rust` 都是 `cpu` 的
+兼容别名，实际使用 Q8 还是 FP32 仍由 manifest 决定。计算线程数会在推理
+启动前固定。
+
+Mac 原生构建需要 macOS SDK/Command Line Tools、Rust 1.86 和 `uv`：
+
+```sh
+scripts/prepare-enzh-model.sh
+cargo build --locked --release -p marian-server --features metal
+target/release/marian-mlx-server --backend metal --model-dir models/enzh
+```
+
+旧自动化仍可使用 `mlx` feature 或 `--backend mlx`，它们现在只是 direct Metal
+实现的兼容 alias。MSL 源码内嵌在可执行文件里，并在进程启动时通过 Metal
+framework 编译，因此不再需要 `libmlx.dylib`、外置 `.metallib`、MLX submodule
+或 `scripts/build-mlx.sh`。Mac Release 只发布一个可执行文件；模型目录仍由用户
+单独下载和准备。
+
+模型准备脚本固定 Python 与转换依赖版本，并用 SHA-256 校验模型文件。模型、
+转换后权重、缓存和构建产物不会进入 Git。
 
 ## 性能
 
-已记录的 M1 短句测试中，FP32 MLX 在并发 32 时达到 536.04 req/s；Bergamot
-int8 容器使用默认单 worker 时为 95.61 req/s，并已用 Instruments 捕获 Metal
-命令执行。这只代表一台机器和一种句长，完整方法见
-[BENCHMARKS](docs/BENCHMARKS.md)。
+此前公开的 M1 数字来自已经移除的 MLX 后端，不能当作 direct Metal 的成绩。
+新后端需要重新完成一致性、吞吐、延迟、内存与 Metal Trace 测量后，才能发布
+当前性能结论。历史基线和复测要求见 [BENCHMARKS](docs/BENCHMARKS.md)。
 
 ## 安全、维护与许可证
 
@@ -201,8 +235,10 @@ int8 容器使用默认单 worker 时为 95.61 req/s，并已用 Instruments 捕
 命令与健康检查见 [OPERATIONS](docs/OPERATIONS.md)，贡献方式见
 [CONTRIBUTING](CONTRIBUTING.md)，安全问题按 [SECURITY](SECURITY.md) 私下报告。
 
-Rust/MLX 服务代码采用 MIT。MLX 是 MIT。Docker CPU 后端使用固定版本的
-官方 Bergamot（MPL-2.0）。本项目不分发模型文件，脚本只在用户主动运行时从
-上游下载。完整依赖与许可证见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+Rust 服务与项目自带的 MSL kernel 采用 MIT。纯 Rust SentencePiece 推理由
+Apache-2.0 许可的 `sentencepiece-rust` crate 提供。CPU kernel 使用的 Rust
+crate 记录在 `Cargo.lock`。本项目不分发模型文件，脚本只在用户主动运行时从
+上游下载。
+完整依赖与许可证见 [第三方声明](THIRD_PARTY_NOTICES.md)。
 
 Firefox 和 Mozilla 是 Mozilla Foundation 在美国及其他国家/地区的商标。

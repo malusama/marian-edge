@@ -10,17 +10,20 @@ fmt: ## Format Rust source
 
 lint: ## Run Clippy with warnings denied
 	cargo clippy --workspace --all-targets --locked -- -D warnings
+	cargo clippy --locked -p marian-server --all-targets --features cpu -- -D warnings
 
 test: ## Run the portable unit and API tests
 	cargo test --workspace --locked
+	cargo test --locked -p marian-server --all-targets --features cpu
 
 check: ## Run the portable Rust checks
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --locked -- -D warnings
 	cargo test --workspace --locked
+	cargo clippy --locked -p marian-server --all-targets --features cpu -- -D warnings
+	cargo test --locked -p marian-server --all-targets --features cpu
 
-build-macos: ## Build the native Apple Silicon MLX runtime
-	scripts/build-mlx.sh
+build-macos: ## Build the native Apple Silicon direct Metal runtime
 	scripts/build-release.sh
 
 model: ## Download, verify, and convert the en-to-zh model

@@ -27,6 +27,19 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      - name: Check explicit pure Rust CPU backend
+        run: |
+          cargo clippy --locked -p marian-server --all-targets --features cpu -- -D warnings
+          cargo test --locked -p marian-server --all-targets --features cpu
+      - name: Pure Rust production contract
+        run: |
+          test ! -e crates/marian-bergamot
+          test "$(sha256sum LICENSE-APACHE-2.0 | awk '{print $1}')" = cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30
+          test -z "$(find crates -type f \( -name '*.c' -o -name '*.h' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.hpp' -o -name 'CMakeLists.txt' \) -print -quit)"
+          ! rg -n 'marian-bergamot|features? *=.*bergamot' Cargo.toml Cargo.lock crates/marian-server
+          ! cargo tree --locked -p marian-server --features cpu --prefix none \
+            | awk '{print $1}' \
+            | rg -x '(bindgen|cc|cmake|cxx|marian-bergamot)'
       - name: Shell contracts
         run: |
           sudo apt-get update
@@ -40,6 +53,91 @@ jobs:
       - name: Dockerfile parses
         run: docker build --check .
 
+  container-smoke:
+    name: Pure Rust Q8 container smoke (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            device: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            device: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build image
+        run: docker build --tag marian-mlx:ci .
+      - name: Start from an empty model volume and translate
+        shell: bash
+        run: |
+          set -euo pipefail
+          container=marian-mlx-ci
+          volume=marian-mlx-ci-model
+          cleanup() {
+            docker rm --force "$container" >/dev/null 2>&1 || true
+            docker volume rm --force "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker volume create "$volume" >/dev/null
+          docker run --detach --name "$container" \
+            --publish 127.0.0.1:13000:3000 \
+            --env MARIAN_MLX_CPU_THREADS=1 \
+            --volume "$volume:/models" \
+            marian-mlx:ci >/dev/null
+
+          ready=false
+          for _ in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:13000/info > /tmp/info.json; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$ready" != true ]]; then
+            docker logs "$container"
+            exit 1
+          fi
+          jq -e --arg device '${{ matrix.device }}' \
+            '.ready and .backend.name == "cpu" and .backend.precision == "q8" and .backend.device == $device' \
+            /tmp/info.json
+
+          curl -fsS http://127.0.0.1:13000/translate \
+            -H 'content-type: application/json' \
+            -d '{"text":"The weather is beautiful today.","from":"en","to":"zh"}' \
+            | jq -e '.text == "今天天气很美。"'
+
+          long_text=
+          for _ in $(seq 1 80); do
+            long_text="${long_text}${long_text:+ }The weather is beautiful today."
+          done
+          jq -n --arg long "$long_text" '{source_lang:"en",target_lang:"zh",text_list:["Line one.\nLine two?\r\nLine three!",$long]}' > /tmp/imme.json
+          curl -fsS http://127.0.0.1:13000/imme \
+            -H 'content-type: application/json' \
+            --data-binary @/tmp/imme.json > /tmp/imme-response.json
+          jq -e '
+            (.translations[0].text | split("\n") | length) == 3 and
+            (.translations[1].text | length) == 639
+          ' /tmp/imme-response.json
+
+          docker exec "$container" sh -c \
+            'test ! -e /models/en-zh/bergamot.yml && test -s /models/en-zh/manifest.json'
+          docker run --rm --entrypoint sh marian-mlx:ci \
+            -c 'ldd /usr/local/bin/marian-mlx-server' > /tmp/ldd.txt
+          ! rg 'libstdc\+\+|libc\+\+|libsentencepiece' /tmp/ldd.txt
+
+          docker restart "$container" >/dev/null
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:13000/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$container"
+          exit 1
+
   licenses:
     name: Dependency policy
     runs-on: ubuntu-24.04
@@ -50,19 +148,13 @@ jobs:
           command: check
 
   apple-native:
-    name: Apple Silicon MLX build
+    name: Apple Silicon direct Metal build
     runs-on: macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          submodules: recursive
-      - name: Select Xcode 16.4
-        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
-      - name: Ensure Metal compiler is available
-        run: xcrun -f metal || xcodebuild -downloadComponent MetalToolchain
-      - name: Build pinned MLX
-        run: scripts/build-mlx.sh
-      - name: Check native backend
-        run: cargo check --locked -p marian-server --features mlx
+      - name: Check direct Metal backend
+        run: cargo check --locked -p marian-server --features metal
+      - name: Test direct Metal crate
+        run: cargo test --locked -p marian-mlx --features metal

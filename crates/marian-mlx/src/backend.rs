@@ -3,16 +3,17 @@ use std::path::Path;
 use marian_core::{
     BackendError, BackendInfo, TranslationBackend, TranslationInput, TranslationOutput,
 };
-use sentencepiece::SentencePieceProcessor;
+use marian_model::ModelManifest;
+use marian_tokenizer::Tokenizer;
 
-use crate::{ffi::bridge, manifest::ModelManifest};
+use crate::engine::MetalEngine;
 
 const MAX_SOURCE_TOKENS: usize = 4_096;
 
-pub struct MlxBackend {
-    engine: cxx::UniquePtr<bridge::Engine>,
-    source: SentencePieceProcessor,
-    target: SentencePieceProcessor,
+pub struct MetalBackend {
+    engine: MetalEngine,
+    source: Tokenizer,
+    target: Tokenizer,
     source_lang: String,
     target_lang: String,
     model_id: String,
@@ -21,7 +22,7 @@ pub struct MlxBackend {
     device: String,
 }
 
-impl MlxBackend {
+impl MetalBackend {
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self, BackendError> {
         let model_dir = std::fs::canonicalize(model_dir.as_ref()).map_err(|error| {
             BackendError::Model(format!(
@@ -30,25 +31,25 @@ impl MlxBackend {
             ))
         })?;
         let manifest = ModelManifest::load(&model_dir)?;
+        if manifest.precision != "fp32" {
+            return Err(BackendError::Model(format!(
+                "Metal requires fp32 safetensors weights, got {}",
+                manifest.precision
+            )));
+        }
         manifest.verify_runtime_files(&model_dir)?;
-        let weights = absolute_utf8(&model_dir.join(&manifest.weights))?;
+        let weights = model_dir.join(&manifest.weights);
         let source_vocab = model_dir.join(&manifest.source_vocab);
         let target_vocab = model_dir.join(&manifest.target_vocab);
-        let shortlist = manifest
-            .shortlist
-            .as_ref()
-            .map(|path| absolute_utf8(&model_dir.join(path)))
-            .transpose()?
-            .unwrap_or_default();
-        let metallib = std::env::var("MARIAN_MLX_METALLIB").unwrap_or_default();
+        let shortlist = manifest.shortlist.as_ref().map(|path| model_dir.join(path));
 
-        let source = SentencePieceProcessor::open(&source_vocab).map_err(|error| {
+        let source = Tokenizer::open(&source_vocab).map_err(|error| {
             BackendError::Model(format!(
                 "failed to load source vocabulary {}: {error}",
                 source_vocab.display()
             ))
         })?;
-        let target = SentencePieceProcessor::open(&target_vocab).map_err(|error| {
+        let target = Tokenizer::open(&target_vocab).map_err(|error| {
             BackendError::Model(format!(
                 "failed to load target vocabulary {}: {error}",
                 target_vocab.display()
@@ -62,21 +63,12 @@ impl MlxBackend {
             ));
         }
 
-        let mut engine = bridge::new_engine(
-            &weights,
-            &shortlist,
-            &metallib,
-            manifest.architecture.max_length_factor,
-        )
-        .map_err(|error| BackendError::Model(error.to_string()))?;
+        let engine = MetalEngine::load(&weights, shortlist.as_deref(), &manifest.architecture)
+            .map_err(BackendError::Model)?;
         engine
-            .pin_mut()
             .warmup()
-            .map_err(|error| BackendError::Inference(format!("MLX warmup failed: {error}")))?;
-        let device = engine
-            .as_ref()
-            .ok_or_else(|| BackendError::Model("MLX returned a null engine".into()))?
-            .device_name();
+            .map_err(|error| BackendError::Inference(format!("Metal warmup failed: {error}")))?;
+        let device = engine.device_name().to_owned();
 
         Ok(Self {
             engine,
@@ -92,15 +84,19 @@ impl MlxBackend {
     }
 }
 
-impl TranslationBackend for MlxBackend {
+impl TranslationBackend for MetalBackend {
     fn info(&self) -> BackendInfo {
         BackendInfo {
-            name: "mlx".into(),
+            name: "metal".into(),
             device: self.device.clone(),
             model: self.model_id.clone(),
             precision: self.precision.clone(),
             supports_batching: true,
         }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.engine.is_ready()
     }
 
     fn translate_batch(
@@ -110,7 +106,10 @@ impl TranslationBackend for MlxBackend {
         if inputs.is_empty() {
             return Ok(Vec::new());
         }
-        let max_output_tokens = inputs[0].max_output_tokens;
+        let max_output_tokens = inputs
+            .iter()
+            .map(|input| input.max_output_tokens)
+            .collect::<Vec<_>>();
         let mut tokens = Vec::new();
         let mut offsets = Vec::with_capacity(inputs.len() + 1);
         offsets.push(0);
@@ -123,16 +122,17 @@ impl TranslationBackend for MlxBackend {
                     input.source_lang, input.target_lang, self.source_lang, self.target_lang
                 )));
             }
-            let pieces = self.source.encode(&input.text).map_err(|error| {
-                BackendError::InvalidInput(format!("SentencePiece encoding failed: {error}"))
-            })?;
+            let pieces = self
+                .source
+                .encode(&input.text)
+                .map_err(|error| BackendError::InvalidInput(error.to_string()))?;
             if pieces.len() + 1 > MAX_SOURCE_TOKENS {
                 return Err(BackendError::InvalidInput(format!(
                     "source has {} tokens including EOS; maximum is {MAX_SOURCE_TOKENS}",
                     pieces.len() + 1
                 )));
             }
-            tokens.extend(pieces.iter().map(|piece| piece.id as i32));
+            tokens.extend_from_slice(&pieces);
             tokens.push(self.eos_id);
             input_lengths.push(pieces.len() + 1);
             offsets.push(tokens.len() as u32);
@@ -140,12 +140,11 @@ impl TranslationBackend for MlxBackend {
 
         let output = self
             .engine
-            .pin_mut()
-            .translate(&tokens, &offsets, max_output_tokens)
-            .map_err(|error| BackendError::Inference(error.to_string()))?;
-        if output.offsets.len() != inputs.len() + 1 || output.scores.len() != inputs.len() {
+            .translate(&tokens, &offsets, &max_output_tokens)
+            .map_err(BackendError::Inference)?;
+        if output.offsets.len() != inputs.len() + 1 {
             return Err(BackendError::Inference(
-                "MLX engine returned malformed batch offsets".into(),
+                "Metal engine returned malformed batch offsets".into(),
             ));
         }
 
@@ -155,21 +154,21 @@ impl TranslationBackend for MlxBackend {
             let end = output.offsets[index + 1] as usize;
             if end < start || end > output.tokens.len() {
                 return Err(BackendError::Inference(
-                    "MLX engine returned out-of-range token offsets".into(),
+                    "Metal engine returned out-of-range token offsets".into(),
                 ));
             }
-            let ids: Vec<u32> = output.tokens[start..end]
+            let ids: Vec<i32> = output.tokens[start..end]
                 .iter()
                 .copied()
                 .filter(|id| *id != self.eos_id)
-                .map(|id| id as u32)
                 .collect();
-            let text = self.target.decode_piece_ids(&ids).map_err(|error| {
-                BackendError::Inference(format!("SentencePiece decoding failed: {error}"))
-            })?;
+            let text = self
+                .target
+                .decode(&ids)
+                .map_err(|error| BackendError::Inference(error.to_string()))?;
             results.push(TranslationOutput {
                 text,
-                // The current greedy C++ decoder does not expose a calibrated
+                // The current greedy decoder does not expose a calibrated
                 // sequence score. Do not present its placeholder as real data.
                 score: None,
                 input_tokens,
@@ -180,8 +179,5 @@ impl TranslationBackend for MlxBackend {
     }
 }
 
-fn absolute_utf8(path: &Path) -> Result<String, BackendError> {
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| BackendError::Model(format!("path is not valid UTF-8: {}", path.display())))
-}
+/// Source-compatibility alias for callers of the pre-Metal API.
+pub type MlxBackend = MetalBackend;

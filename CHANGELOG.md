@@ -5,6 +5,37 @@ Versioning after the first stable release.
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced the native MLX/CXX inference bridge with a Rust host using
+  `objc2-metal` and runtime-compiled, embedded MSL compute kernels.
+- Renamed the native Cargo feature and CLI backend to `metal`; `mlx` remains a
+  compatibility alias for existing automation.
+- Simplified native macOS releases to one executable with no `libmlx.dylib` or
+  external `.metallib`.
+- Replaced the native SentencePiece dependency on macOS with the independent
+  `marian-tokenizer` crate backed by pure-Rust `sentencepiece-rust` inference.
+- Added a portable `cpu` backend implementing the complete FP32 and Q8 Marian
+  Transformer/SSRU graphs, lexical shortlist, and greedy decoder in Rust.
+- Made the pure-Rust CPU backend the Linux automatic and container runtime. It
+  selects Q8 or FP32 from the validated model manifest; `cpu-q8`, `cpu-fp32`,
+  and `rust` remain CLI aliases.
+- Applied the 1/2/4 CPU thread setting to both FP32 matrix multiplication and
+  Q8 rten/exact-AVX2 row parallelism without creating extra model replicas.
+- Added strict Marian binary v1 Q8 tensor-set, shape, alpha, and constant
+  validation. Dense Q8 weights stay quantized during inference.
+- Added pure-Rust, tokenizer-aware long-text segmentation with bounded chunks,
+  stable output ordering, and whitespace/newline preservation.
+- Qualified Q8 with five exact release golden outputs and a 200-item
+  differential corpus: 164/200 outputs exactly matched the retired CPU
+  reference. Tested 80-sentence and newline cases matched its long-text
+  baseline; general bit-for-bit equivalence is not claimed.
+
+### Removed
+
+- Removed the Bergamot/C++ CPU worker, its build toolchain, pipe protocol, and
+  container runtime dependencies.
+
 ## [0.1.1] - 2026-07-14
 
 ### Fixed

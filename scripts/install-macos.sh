@@ -151,7 +151,7 @@ new_service_is_ready() {
   is_loaded "$LABEL" &&
     curl --max-time 2 -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1 &&
     curl --max-time 2 -fsS "http://127.0.0.1:$PORT/info" 2>/dev/null |
-      grep -Eq '"name"[[:space:]]*:[[:space:]]*"mlx"'
+      grep -Eq '"name"[[:space:]]*:[[:space:]]*"(metal|mlx)"'
 }
 
 legacy_service_is_ready() {
@@ -343,21 +343,18 @@ bundle_is_valid() {
   bundle=$1
   [ -d "$bundle" ] && \
   [ -x "$bundle/marian-mlx-server" ] && \
-  [ -f "$bundle/libmlx.dylib" ] && \
-  [ -f "$bundle/mlx.metallib" ] && \
   [ -x "$bundle/scripts/prepare-enzh-model.sh" ] && \
   [ -x "$bundle/scripts/marian-mlxctl" ] && \
   [ -x "$bundle/scripts/uninstall-macos.sh" ] && \
   [ ! -L "$bundle/marian-mlx-server" ] && \
-  [ ! -L "$bundle/libmlx.dylib" ] && \
-  [ ! -L "$bundle/mlx.metallib" ] && \
+  [ ! -e "$bundle/libmlx.dylib" ] && \
+  [ ! -e "$bundle/mlx.metallib" ] && \
   [ -f "$bundle/SHA256SUMS" ] && \
   ! find "$bundle" -type l -print -quit | grep -q . && \
+  ! find "$bundle" \( -name '*.dylib' -o -name '*.metallib' \) -print -quit | grep -q . && \
   (cd "$bundle" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) && \
   file "$bundle/marian-mlx-server" | grep -q arm64 && \
-  file "$bundle/libmlx.dylib" | grep -q arm64 && \
-  codesign --verify --strict "$bundle/marian-mlx-server" >/dev/null 2>&1 && \
-  codesign --verify --strict "$bundle/libmlx.dylib" >/dev/null 2>&1
+  codesign --verify --strict "$bundle/marian-mlx-server" >/dev/null 2>&1
 }
 
 bundle_is_valid "$BUNDLE" || fail "release bundle verification failed"
@@ -472,7 +469,6 @@ sed_replacement() {
 }
 PROGRAM=$(sed_replacement "$(xml_escape "$BASE/current/marian-mlx-server")")
 MODEL_DIR=$(sed_replacement "$(xml_escape "$BASE/models/en-zh")")
-METALLIB=$(sed_replacement "$(xml_escape "$BASE/current/mlx.metallib")")
 STDOUT=$(sed_replacement "$(xml_escape "$STATE/server.log")")
 STDERR=$(sed_replacement "$(xml_escape "$STATE/server.error.log")")
 BIND=$(sed_replacement "$(xml_escape "127.0.0.1:$PORT")")
@@ -487,7 +483,6 @@ PLIST_NEW="$TMP/$LABEL.plist"
 sed \
   -e "s|@PROGRAM@|$PROGRAM|g" \
   -e "s|@MODEL_DIR@|$MODEL_DIR|g" \
-  -e "s|@METALLIB@|$METALLIB|g" \
   -e "s|@STDOUT@|$STDOUT|g" \
   -e "s|@STDERR@|$STDERR|g" \
   -e "s|@BIND@|$BIND|g" \
@@ -517,7 +512,7 @@ while [ "$attempt" -lt 60 ]; do
   if is_loaded "$LABEL" && \
      curl --max-time 2 -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1; then
     INFO=$(curl --max-time 2 -fsS "http://127.0.0.1:$PORT/info" 2>/dev/null || true)
-    if printf '%s' "$INFO" | grep -Eq '"name"[[:space:]]*:[[:space:]]*"mlx"'; then
+    if printf '%s' "$INFO" | grep -Eq '"name"[[:space:]]*:[[:space:]]*"(metal|mlx)"'; then
       READY=true
       break
     fi

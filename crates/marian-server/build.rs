@@ -22,9 +22,4 @@ fn main() {
             .unwrap_or("unknown")
     );
     println!("cargo:rerun-if-env-changed=MARIAN_MLX_BUILD_GIT_SHA");
-
-    #[cfg(feature = "mlx")]
-    {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
-    }
 }

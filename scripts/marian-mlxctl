@@ -70,7 +70,7 @@ start_service() {
 is_ready() {
   curl --max-time 2 -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1 &&
     curl --max-time 2 -fsS "http://127.0.0.1:$PORT/info" 2>/dev/null |
-      grep -Eq '"name"[[:space:]]*:[[:space:]]*"mlx"'
+      grep -Eq '"name"[[:space:]]*:[[:space:]]*"(metal|mlx)"'
 }
 
 wait_until_ready() {
@@ -278,6 +278,76 @@ verify_model() {
     8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681
 }
 
+release_uses_legacy_mlx() {
+  release=$1
+  [ -f "$release/libmlx.dylib" ] && [ ! -L "$release/libmlx.dylib" ] &&
+    [ -f "$release/mlx.metallib" ] && [ ! -L "$release/mlx.metallib" ]
+}
+
+release_is_valid() {
+  release=$1
+  if [ ! -d "$release" ] ||
+     [ ! -x "$release/marian-mlx-server" ] ||
+     [ -L "$release/marian-mlx-server" ] ||
+     [ ! -f "$release/SHA256SUMS" ]; then
+    return 1
+  fi
+  if ! (cd "$release" && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) ||
+     ! file "$release/marian-mlx-server" | grep -q arm64 ||
+     ! codesign --verify --strict "$release/marian-mlx-server" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if [ -e "$release/libmlx.dylib" ] || [ -e "$release/mlx.metallib" ]; then
+    release_uses_legacy_mlx "$release" &&
+      file "$release/libmlx.dylib" | grep -q arm64 &&
+      codesign --verify --strict "$release/libmlx.dylib" >/dev/null 2>&1
+  else
+    return 0
+  fi
+}
+
+configure_plist_for_release() {
+  release=$1
+  plist_new="$PLIST.marian-mlxctl.$$"
+  rm -f "$plist_new"
+  cp -p "$PLIST" "$plist_new" || return 1
+
+  if release_uses_legacy_mlx "$release"; then
+    if ! plutil -replace ProgramArguments.2 -string mlx "$plist_new"; then
+      rm -f "$plist_new"
+      return 1
+    fi
+    # `plutil -remove` is intentionally allowed to miss on a direct Metal plist.
+    plutil -remove EnvironmentVariables "$plist_new" >/dev/null 2>&1 || true
+    if ! plutil -insert EnvironmentVariables -xml '<dict/>' "$plist_new" ||
+       ! plutil -insert EnvironmentVariables.MARIAN_MLX_METALLIB \
+         -string "$release/mlx.metallib" "$plist_new"; then
+      rm -f "$plist_new"
+      return 1
+    fi
+  else
+    if ! plutil -replace ProgramArguments.2 -string metal "$plist_new"; then
+      rm -f "$plist_new"
+      return 1
+    fi
+    plutil -remove EnvironmentVariables "$plist_new" >/dev/null 2>&1 || true
+  fi
+
+  if ! plutil -lint "$plist_new" >/dev/null || ! install -m 0644 "$plist_new" "$PLIST"; then
+    rm -f "$plist_new"
+    return 1
+  fi
+  rm -f "$plist_new"
+}
+
+restart_service_from_plist() {
+  if is_loaded; then
+    launchctl bootout "$DOMAIN/$LABEL" >/dev/null || return 1
+  fi
+  wait_for_port_free && start_service
+}
+
 download() {
   destination=$1
   url=$2
@@ -307,13 +377,7 @@ case "${1:-}" in
     start_service
     ;;
   verify)
-    test -x "$BASE/current/marian-mlx-server"
-    test -f "$BASE/current/libmlx.dylib"
-    test -f "$BASE/current/mlx.metallib"
-    test -f "$BASE/current/SHA256SUMS"
-    (cd "$BASE/current" && shasum -a 256 -c SHA256SUMS >/dev/null)
-    codesign --verify --strict "$BASE/current/marian-mlx-server"
-    codesign --verify --strict "$BASE/current/libmlx.dylib"
+    release_is_valid "$BASE/current"
     verify_model
     is_ready
     curl --max-time 2 -fsS "http://127.0.0.1:$PORT/info" && echo
@@ -333,14 +397,19 @@ case "${1:-}" in
       echo "current release link is missing" >&2
       exit 1
     }
-    (cd "$PREVIOUS" && shasum -a 256 -c SHA256SUMS >/dev/null)
-    codesign --verify --strict "$PREVIOUS/marian-mlx-server"
-    codesign --verify --strict "$PREVIOUS/libmlx.dylib"
+    release_is_valid "$PREVIOUS" || {
+      echo "previous release verification failed" >&2
+      exit 1
+    }
+    PLIST_BACKUP="$PLIST.rollback.$$"
+    cp -p "$PLIST" "$PLIST_BACKUP"
     ln -sfn "$PREVIOUS" "$BASE/current.new"
     mv -h "$BASE/current.new" "$BASE/current"
     ln -sfn "$CURRENT" "$BASE/previous.new"
     mv -h "$BASE/previous.new" "$BASE/previous"
-    if start_service && wait_until_ready; then
+    if configure_plist_for_release "$PREVIOUS" &&
+       restart_service_from_plist && wait_until_ready; then
+      rm -f "$PLIST_BACKUP"
       echo "rolled back to $PREVIOUS"
     else
       echo "rollback failed; restoring $CURRENT" >&2
@@ -348,7 +417,9 @@ case "${1:-}" in
       mv -h "$BASE/current.new" "$BASE/current"
       ln -sfn "$PREVIOUS" "$BASE/previous.new"
       mv -h "$BASE/previous.new" "$BASE/previous"
-      start_service || true
+      install -m 0644 "$PLIST_BACKUP" "$PLIST" || true
+      rm -f "$PLIST_BACKUP"
+      restart_service_from_plist || true
       exit 1
     fi
     ;;

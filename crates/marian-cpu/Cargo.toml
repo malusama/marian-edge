@@ -1,0 +1,24 @@
+[package]
+name = "marian-cpu"
+description = "Pure Rust FP32 and Q8 CPU backends for Marian Transformer-SSRU models"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+marian-core.workspace = true
+marian-model.workspace = true
+marian-tokenizer.workspace = true
+matrixmultiply.workspace = true
+rten-gemm.workspace = true
+rten-tensor.workspace = true
+rayon.workspace = true
+safetensors.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+sha2.workspace = true

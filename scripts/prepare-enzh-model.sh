@@ -5,6 +5,7 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 OUTPUT=${1:-"$ROOT/models/enzh"}
 CACHE=${MODEL_CACHE_DIR:-"$ROOT/.cache/mozilla-enzh"}
 UV_BIN=${UV_BIN:-uv}
+PYTHON_VERSION=${MARIAN_MLX_CONVERTER_PYTHON:-3.12}
 STAGING="${OUTPUT}.staging.$$"
 PREVIOUS="${OUTPUT}.previous.$$"
 BASE='https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/models/en-zh/llmaat_finetune10M_qe8_f2_ByQcSxGXQRqGi-UTxYE43g'
@@ -58,7 +59,7 @@ verify bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5 "$CACHE/
 verify aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d "$CACHE/target.spm"
 verify 8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681 "$CACHE/shortlist.bin"
 
-"$UV_BIN" run --isolated --python 3.12.13 \
+"$UV_BIN" run --isolated --python "$PYTHON_VERSION" \
   --with numpy==2.5.1 --with safetensors==0.8.0 \
   python "$ROOT/tools/convert_marian.py" \
   --model "$CACHE/model.npz" \
@@ -67,6 +68,16 @@ verify 8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681 "$CACHE/
   --shortlist "$CACHE/shortlist.bin" \
   --output "$STAGING" \
   --force
+
+[ -s "$STAGING/model.fp32.safetensors" ] || {
+  echo "converted FP32 weights are missing" >&2
+  exit 1
+}
+grep -Eq '"format"[[:space:]]*:[[:space:]]*"marian-mlx\.transformer-ssru\.v1"' \
+  "$STAGING/manifest.json" || {
+  echo "converted model manifest is invalid" >&2
+  exit 1
+}
 
 if [ -d "$OUTPUT" ]; then
   mv "$OUTPUT" "$PREVIOUS"

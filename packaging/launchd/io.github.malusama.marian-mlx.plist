@@ -8,18 +8,13 @@
   <array>
     <string>@PROGRAM@</string>
     <string>--backend</string>
-    <string>mlx</string>
+    <string>metal</string>
     <string>--model-dir</string>
     <string>@MODEL_DIR@</string>
     <string>--bind</string>
     <string>@BIND@</string>
     @CORS_ARGUMENT@
   </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>MARIAN_MLX_METALLIB</key>
-    <string>@METALLIB@</string>
-  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

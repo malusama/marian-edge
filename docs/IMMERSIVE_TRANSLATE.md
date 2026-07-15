@@ -64,6 +64,10 @@ The response shape is:
   Chinese; Chinese-to-English is not included yet.
 - Browser cannot connect: use `127.0.0.1`, not a container-only hostname, and
   confirm the host publishes port 3000.
-- Translation differs from another local service: the native backend uses the
-  original FP32 graph while the CPU container uses an int8 Bergamot model;
-  near-tie token choices can differ.
+- Translation differs from another local service: the native direct Metal
+  backend uses FP32 weights while the pure-Rust CPU container uses Q8 weights;
+  near-tie token choices can differ. The Q8 release gate requires the five
+  golden translations but does not claim bit-for-bit FP32 equivalence.
+- A long paragraph is returned as one list item: the CPU backend segments it at
+  tokenizer-aware sentence boundaries, translates bounded chunks, preserves
+  separators such as newlines, and reassembles the result in order.

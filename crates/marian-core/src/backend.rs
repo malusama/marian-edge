@@ -2,8 +2,8 @@ use crate::{BackendError, BackendInfo, TranslationInput, TranslationOutput};
 
 /// A synchronous inference backend owned exclusively by the scheduler thread.
 ///
-/// It intentionally does not require `Send` or `Sync`: GPU objects are created,
-/// used, and destroyed on the same dedicated thread.
+/// It intentionally does not require `Send` or `Sync`: accelerator objects and
+/// CPU model state are created, used, and destroyed on one dedicated thread.
 pub trait TranslationBackend: 'static {
     fn info(&self) -> BackendInfo;
 

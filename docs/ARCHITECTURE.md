@@ -20,16 +20,47 @@ direction/shape-aware micro-batcher
     v
 one backend-owner OS thread
     |
-    +--> MLX lazy graph --> Metal command queue (native macOS)
+    +--> Rust host / embedded MSL --> Metal queue (native macOS)
     |
-    +--> persistent Bergamot worker / Ruy CPU (Linux image)
+    +--> pure Rust Q8/FP32 graph / CPU kernels (portable and Linux image)
 ```
 
 `marian-server` owns HTTP contracts, input limits, CORS, health endpoints, and
-shutdown. `marian-core` owns backend-neutral scheduling and metrics. `marian-mlx`
-owns model validation, tokenization, the CXX bridge, and the Apple GPU graph.
-The CPU backend uses the same `TranslationBackend` trait and talks to one
-persistent worker over a length-prefixed pipe protocol.
+shutdown. `marian-core` owns backend-neutral scheduling and metrics.
+`marian-tokenizer` owns the narrow pure-Rust SentencePiece inference boundary.
+`marian-mlx` owns model validation, the Rust Metal host, and the Apple GPU
+compute graph. It calls the system Metal API through `objc2-metal`;
+the MSL source is embedded in the executable, compiled at process startup with
+fast math disabled, and turned into compute pipeline states owned by the
+backend thread. `marian-cpu` owns the portable FP32 Transformer/SSRU executor,
+the complete Q8 Transformer/SSRU executor, pure-Rust CPU kernels, and
+tokenizer-aware long-text segmentation. Q8 dense weights remain quantized;
+embedding rows and the final shortlist are materialized only as needed.
+
+There is no MLX library, CXX inference bridge, native tokenizer, or external
+CPU inference process. Both the native Metal and portable CPU hosts are Rust.
+
+`--backend cpu` selects Q8 or FP32 from the validated model manifest. It is the
+automatic Linux and container backend. `--cpu-threads` accepts 1, 2, or 4 and
+sets both `MATMUL_NUM_THREADS` and `RAYON_NUM_THREADS` before inference starts.
+It controls FP32 matrix multiplication and Q8 rten/exact-AVX2 row parallelism;
+it does not create additional model owners or weight replicas. The executor
+enforces a 256-piece source-chunk cap, a bounded generation cap, and a padded
+`batch * source_length^2` budget. These are engine-level limits: HTTP timeouts
+do not cancel synchronous inference already running on the backend owner
+thread.
+
+The Q8 path strictly parses the existing Marian binary v1 artifact and
+validates the complete expected tensor set. All 70 quantized weight tensors
+were checked byte-for-byte against quantization of the FP32 artifact. The
+runtime executes the same six-layer Transformer encoder and four-layer SSRU
+decoder as the FP32 path without dequantizing the whole model.
+
+Inputs longer than one CPU chunk pass through the pure-Rust segmenter. It uses
+the real source tokenizer to verify piece counts, prefers sentence boundaries,
+falls back safely for punctuation-free input, preserves whitespace and
+newlines, and reassembles outputs in original order. Chunk sub-batches remain
+within the same quadratic-work budget.
 
 ## Concurrency model
 
@@ -48,16 +79,25 @@ Important invariants:
 - output order matches input order for `/imme` batches;
 - readiness turns false before shutdown drains the worker.
 
-## Native MLX backend
+## Native Metal backend
 
-The decoder implements the graph used by the current English-to-Chinese
+The backend implements the graph used by the current English-to-Chinese
 Mozilla `base-memory` model: a six-layer Transformer encoder, a four-layer
-SSRU decoder, greedy beam-1 decoding, and a lexical shortlist. The manifest is
-validated before loading. FP32 is the supported default because it currently
-has the best measured parity/performance combination on the M1 baseline.
+SSRU decoder, greedy beam-1 decoding, and a lexical shortlist. The Rust host
+loads and validates FP32 safetensors, records direct Metal compute commands,
+and keeps model buffers, decoder state, and pipeline states on its owner
+thread. The manifest and artifact checksums are validated before loading.
+Embedding and each encoder layer are submitted separately so a retained Metal
+command buffer cannot keep all six quadratic attention-score allocations alive
+at once. Do not merge those submissions without measuring worst-case source
+length memory. A command-queue creation or execution failure also makes the
+backend not-ready so the scheduler stops admitting work to a failed device.
 
-MLX lazy evaluation means a Rust function call is not proof of GPU execution.
-Use Instruments Metal System Trace for performance validation.
+The public backend and Cargo feature are named `metal`. `mlx` remains only as a
+compatibility alias and selects the same implementation. A release does not
+need `libmlx.dylib` or an external `.metallib`: runtime-compiled MSL is embedded
+in the server executable. Use Instruments Metal System Trace to validate GPU
+execution and profile command-buffer or kernel behavior.
 
 ## Adding a language direction
 
@@ -73,7 +113,10 @@ List a direction only after its runtime and tests are in place.
 
 ## Release boundary
 
-Source, runtime binaries, and model files are tracked separately.
-The repository and native runtime are MIT; MLX remains under its own MIT
-license; the operator downloads model artifacts directly from Mozilla. Docker
-uses a pinned MPL-2.0 Bergamot source revision and does not contain a model.
+Source, runtime binaries, and model files are tracked separately. Native macOS
+release archives contain one server executable; model files remain separate
+operator downloads. The Rust host and project MSL kernels are MIT.
+Pure-Rust SentencePiece inference comes from the Apache-2.0
+`sentencepiece-rust` crate. The Linux image contains the Rust server and does
+not contain a model; the operator downloads verified model artifacts into a
+separate volume.
