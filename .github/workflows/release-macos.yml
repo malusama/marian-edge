@@ -18,6 +18,12 @@ jobs:
         run: rustup show active-toolchain
       - name: Portable release gates
         run: make check
+      - name: Native Metal unit gates
+        run: |
+          cargo clippy --locked -p marian-mlx --all-targets --features metal -- -D warnings
+          cargo clippy --locked -p marian-server --all-targets --features metal -- -D warnings
+          cargo test --locked -p marian-mlx --features metal --lib
+          python3 tools/test_summarize_metal_trace.py
       - name: Check tag version
         run: |
           TAG_VERSION=${GITHUB_REF_NAME#v}
@@ -32,6 +38,12 @@ jobs:
           ' Cargo.toml)
           test -n "$WORKSPACE_VERSION"
           test "$TAG_VERSION" = "$WORKSPACE_VERSION"
+          awk -v version="$TAG_VERSION" '
+            index($0, "## [" version "]") == 1 { found = 1 }
+            found && /^## \[/ && index($0, "## [" version "]") != 1 { exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/release-notes.md
+          test -s /tmp/release-notes.md
       - name: Build release archive
         env:
           VERSION: ${{ github.ref_name }}
@@ -53,9 +65,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
-          gh release upload "$GITHUB_REF_NAME" --clobber \
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; refusing to replace immutable assets" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md \
             dist/marian-mlx-macos-arm64.tar.gz \
             dist/SHA256SUMS \
             dist/install-macos.sh

@@ -7,7 +7,6 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use futures_util::future::join_all;
 use marian_core::{TranslateError, TranslationInput, Translator};
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -153,55 +152,24 @@ async fn immersive_translate(
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
 
-    // Group equal source/length buckets before submission so alternating short
-    // and long page fragments do not fragment otherwise compatible GPU
-    // batches. Every task carries its original index for response-order
-    // restoration below.
-    let mut inputs = inputs.into_iter().enumerate().collect::<Vec<_>>();
-    inputs.sort_by(
-        |(_, (left_text, left_source)), (_, (right_text, right_source))| {
-            let bucket = |text: &str| {
-                text.chars()
-                    .count()
-                    .max(1)
-                    .checked_next_power_of_two()
-                    .unwrap_or(usize::MAX)
-            };
-            left_source
-                .cmp(right_source)
-                .then_with(|| bucket(left_text).cmp(&bucket(right_text)))
-        },
-    );
-    let mut tasks = Vec::with_capacity(inputs.len());
-    for (index, (text, source)) in inputs {
-        let translator = state.translator.clone();
-        let target = target.clone();
-        tasks.push(async move {
-            let output = translator
-                .translate(TranslationInput::new(text, &source, target))
-                .await;
-            output.map(|output| {
-                (
-                    index,
-                    ImmersiveItem {
-                        detected_source_lang: source,
-                        text: output.text,
-                    },
-                )
-            })
-        });
-    }
-
-    let mut translations = std::iter::repeat_with(|| None)
-        .take(tasks.len())
+    let sources = inputs
+        .iter()
+        .map(|(_, source)| source.clone())
         .collect::<Vec<_>>();
-    for result in join_all(tasks).await {
-        let (index, item) = result?;
-        translations[index] = Some(item);
-    }
-    let translations = translations
+    let logical_inputs = inputs
         .into_iter()
-        .map(|item| item.expect("every immersive translation task returned an index"))
+        .map(|(text, source)| TranslationInput::new(text, source, target.clone()))
+        .collect();
+    let translations = state
+        .translator
+        .translate_many(logical_inputs)
+        .await?
+        .into_iter()
+        .zip(sources)
+        .map(|(output, source)| ImmersiveItem {
+            detected_source_lang: source,
+            text: output.text,
+        })
         .collect();
     Ok(Json(ImmersiveResponse { translations }))
 }
@@ -473,14 +441,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn immersive_items_are_batch_eligible_and_keep_input_order() {
+    async fn immersive_sorts_across_length_buckets_and_restores_input_order() {
         let (app, translator) = test_app();
         let response = app
             .oneshot(
                 Request::post("/imme")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"source_lang":"en_US","target_lang":"zh-Hans","text_list":["one","two","six","ten"]}"#,
+                        r#"{"source_lang":"en_US","target_lang":"zh-Hans","text_list":["a","ninechars","xyz","this sentence is deliberately much longer"]}"#,
                     ))
                     .unwrap(),
             )
@@ -494,7 +462,15 @@ mod tests {
             .iter()
             .map(|translation| translation.text.as_str())
             .collect();
-        assert_eq!(texts, ["one", "two", "six", "ten"]);
+        assert_eq!(
+            texts,
+            [
+                "a",
+                "ninechars",
+                "xyz",
+                "this sentence is deliberately much longer"
+            ]
+        );
         let stats = translator.stats().snapshot();
         assert_eq!(stats.accepted, 4);
         assert_eq!(stats.completed, 4);

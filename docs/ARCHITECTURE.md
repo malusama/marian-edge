@@ -1,7 +1,12 @@
 # Architecture and maintenance guide
 
-This document explains where a change belongs and which invariants must remain
-true.
+This document defines where policy lives, how a request moves through the
+system, and which boundaries must remain stable as new backends or language
+directions are added.
+
+The central rule is simple: `marian-core` owns backend-neutral policy;
+backends own execution mechanisms and hardware choices. HTTP adapters must not
+reimplement scheduler policy, and the scheduler must not learn GPU geometry.
 
 ## Request path
 
@@ -9,135 +14,223 @@ true.
 HTTP clients
     |
     v
-Axum validation and compatibility adapters
+marian-server: validation + protocol adapters
     |
     v
-bounded flume queue -- full --> HTTP 503 + Retry-After
+marian-core: bounded admission -- full --> HTTP 503 + Retry-After
     |
     v
-direction/shape-aware micro-batcher
+canonical ordering + direction/shape micro-batching
     |
     v
-one backend-owner OS thread
+one backend-owner OS thread per loaded model
     |
-    +--> Rust host / embedded MSL --> Metal queue (native macOS)
+    +--> marian-mlx --> embedded MSL / MPS --> Metal GPU
     |
-    +--> pure Rust Q8/FP32 graph / CPU kernels (portable and Linux image)
+    +--> marian-cpu --> Q8 or FP32 Rust graph --> CPU kernels
 ```
 
-`marian-server` owns HTTP contracts, input limits, CORS, health endpoints, and
-shutdown. `marian-core` owns backend-neutral scheduling and metrics.
-`marian-tokenizer` owns the narrow pure-Rust SentencePiece inference boundary.
-`marian-mlx` owns model validation, the Rust Metal host, and the Apple GPU
-compute graph. It calls the system Metal API through `objc2-metal`;
-the MSL source is embedded in the executable, compiled at process startup with
-fast math disabled, and turned into compute pipeline states owned by the
-backend thread. `marian-cpu` owns the portable FP32 Transformer/SSRU executor,
-the complete Q8 Transformer/SSRU executor, pure-Rust CPU kernels, and
-tokenizer-aware long-text segmentation. Q8 dense weights remain quantized;
-embedding rows and the final shortlist are materialized only as needed.
+Tokio owns connection concurrency; it does not own inference state. Model and
+device state are constructed, used, and destroyed on one backend thread. This
+keeps non-`Send` accelerator objects local, prevents accidental weight replicas,
+and makes failure and shutdown state explicit.
 
-There is no MLX library, CXX inference bridge, native tokenizer, or external
-CPU inference process. Both the native Metal and portable CPU hosts are Rust.
+## Crate boundaries
 
-`--backend cpu` selects Q8 or FP32 from the validated model manifest. It is the
-automatic Linux and container backend. `--cpu-threads` accepts 1, 2, or 4 and
-sets both `MATMUL_NUM_THREADS` and `RAYON_NUM_THREADS` before inference starts.
-It controls FP32 matrix multiplication and Q8 rten/exact-AVX2 row parallelism;
-it does not create additional model owners or weight replicas. The executor
-enforces a 256-piece source-chunk cap, a bounded generation cap, and a padded
-`batch * source_length^2` budget. These are engine-level limits: HTTP timeouts
-do not cancel synchronous inference already running on the backend owner
-thread.
+| Crate | Owns | Must not own |
+|---|---|---|
+| `marian-core` | Request/result types, backend trait, bounded admission, canonical batch key, micro-batching, metrics, logical duplicate coalescing, and tokenizer-aware segmentation algorithm | HTTP payloads, model formats, tokenizer implementation, CPU/Metal graph code, or device occupancy constants |
+| `marian-model` | Manifest schema, artifact paths, checksums, architecture metadata, and shortlist loading | HTTP or scheduling policy |
+| `marian-tokenizer` | Pure-Rust SentencePiece inference boundary | Text-segmentation policy or backend graph code |
+| `marian-cpu` | Portable FP32 and Q8 Transformer/SSRU executors, CPU kernels, scratch reuse, and CPU-specific work limits | HTTP contracts or Metal policy |
+| `marian-mlx` | Metal backend, graph engine, embedded kernels, command submission, workspace/cache lifetimes, and device tuning | HTTP contracts or generic scheduler policy |
+| `marian-server` | Axum routes, request/body limits, CORS, health/readiness, backend selection, and protocol compatibility | Length bucketing, duplicate occupancy policy, or inference arithmetic |
 
-The Q8 path strictly parses the existing Marian binary v1 artifact and
-validates the complete expected tensor set. All 70 quantized weight tensors
-were checked byte-for-byte against quantization of the FP32 artifact. The
-runtime executes the same six-layer Transformer encoder and four-layer SSRU
-decoder as the FP32 path without dequantizing the whole model.
+`marian-mlx` has no production dependency on `marian-cpu`. Its CPU dependency
+is dev-only and exists for differential tests. Both production backends depend
+on the shared contracts in `marian-core`, `marian-model`, and, when enabled,
+`marian-tokenizer`.
 
-Inputs longer than one CPU chunk pass through the pure-Rust segmenter. It uses
-the real source tokenizer to verify piece counts, prefers sentence boundaries,
-falls back safely for punctuation-free input, preserves whitespace and
-newlines, and reassembles outputs in original order. Chunk sub-batches remain
-within the same quadratic-work budget.
+Use this placement rule when adding code:
 
-## Concurrency model
+| Change | Destination |
+|---|---|
+| HTTP validation, payload shape, CORS, or endpoint behavior | `marian-server` |
+| Admission, batch compatibility, logical deduplication, or segmentation policy | `marian-core` |
+| Manifest, checksum, tensor metadata, or shortlist format | `marian-model` |
+| SentencePiece encoding/decoding | `marian-tokenizer` |
+| CPU arithmetic, dispatch, representation, or scratch strategy | `marian-cpu` |
+| GPU arithmetic, resource lifetime, command grouping, or device tuning | `marian-mlx` |
 
-Tokio handles many connections, but inference state is deliberately owned by
-one OS thread per loaded model. This avoids unsafe cross-thread GPU objects and
-uncontrolled weight duplication. Requests enter a bounded queue and compatible
-items are collected for a short window. Batch membership is based on direction,
-maximum output length, and a power-of-two source-length bucket.
-Byte-for-byte duplicate inputs inside that one batch may share an inference
-result; there is no cross-batch result cache. Accelerator backends can retain a
-small number of duplicate rows to avoid inefficient matrix shapes. `/imme`
-submits its bounded request in compatible length-bucket order, then restores
-the caller's original item order.
+In particular, M-series tile widths, decode submission sizes, and occupancy
+floors belong in Metal tuning, never in core scheduling.
+
+## Long-text contract
+
+`marian-core::segment_text` is tokenizer-independent: a backend supplies a
+closure that returns the exact source-piece count. The shared algorithm prefers
+sentence boundaries, has a safe fallback for punctuation-free text, and
+preserves separators, whitespace, newlines, and source order.
+
+The execution limit remains backend-specific:
+
+| Backend | Maximum source segment | Additional work bound |
+|---|---:|---|
+| CPU | 255 source pieces plus EOS | bounded `batch * padded_source_length^2` attention work |
+| Metal | 4095 source pieces plus EOS | 4096-position model/runtime limit |
+
+Each input still produces one output. Segments are reassembled in order, and
+the original input's `max_output_tokens` is one shared budget across all
+segments rather than a fresh budget per segment. The HTTP layer separately
+limits text to 64 KiB; transport limits do not replace backend token limits.
+
+## Scheduling contract
+
+Requests enter a finite admission queue. A batch is compatible when its
+language direction, output budget, and power-of-two source-character-count
+bucket match. The first incompatible queued item is deferred without draining
+the bounded queue into an unbounded shadow queue.
+
+`Translator::translate_many` is the public path for a bounded logical group
+such as `/imme`: it sorts by the canonical `TranslationInput::batch_key`,
+submits the items, and restores caller order. Protocol code must call it rather
+than reproducing bucketing rules.
+
+Within one dynamic batch, core coalesces byte-for-byte identical logical inputs
+and calls `translate_batch_with_repetitions` with one row plus its admitted
+request count. A backend may use that count to materialize extra physical rows
+for an accelerator occupancy knee, but it must return exactly one result per
+logical row. The Metal backend makes that physical-row decision from its tuning
+profile. There is no cross-batch translation-result cache.
 
 Important invariants:
 
-- queue capacity is finite;
-- overload is visible to the caller;
-- model construction, inference, and destruction happen on the owner thread;
-- a production backend never silently falls back to echo;
-- output order matches input order for `/imme` batches;
-- readiness turns false before shutdown drains the worker.
+- queue capacity is finite and overload is visible to callers;
+- model construction, inference, and destruction stay on the owner thread;
+- production backends never silently fall back to echo;
+- logical output count and caller order are preserved;
+- device geometry does not leak into `marian-core`;
+- readiness becomes false before shutdown drains or after a terminal backend
+  failure.
+
+## CPU backend
+
+`--backend cpu` validates the manifest and selects Q8 or FP32 execution. It is
+the automatic Linux and container backend. Q8 dense weights stay quantized;
+embedding rows and shortlist values are materialized only when required. The
+executor uses reusable scratch and shape-aware kernels rather than additional
+model owners.
+
+`--cpu-threads` accepts 1, 2, or 4 and configures both the FP32 matrix-multiply
+and Rayon pools before inference starts. It changes internal compute
+parallelism, not model ownership. HTTP timeouts do not cancel synchronous work
+already executing on the owner thread.
+
+The Q8 path strictly parses the Marian binary v1 artifact and validates the
+complete expected tensor set. Exact scalar fallbacks remain the correctness
+oracle for hardware-specific kernels and sensitive reduction order.
 
 ## Native Metal backend
 
-The backend implements the graph used by the current English-to-Chinese
-Mozilla `base-memory` model: a six-layer Transformer encoder, a four-layer
-SSRU decoder, greedy beam-1 decoding, and a lexical shortlist. The Rust host
-memory-maps and validates FP32 safetensors, records direct Metal and Metal
-Performance Shaders commands, and keeps model buffers, separate reusable
-encoder/decoder/cross/upload arenas, decoder state, cached persistent matrix
-views, and pipeline states on its owner thread. The manifest and artifact checksums are
-validated before loading. FP32 model storage is the default; the explicit
-`MARIAN_MLX_METAL_PRECISION=mixed-f16` mode converts uploaded model storage to
-FP16 while leaving activations and reductions in FP32, and reports that mode
-through `/info`.
-Supported self-attention and single-query cross-attention shapes use a fused
-four-query Metal kernel. It streams 32-key tiles, updates an online softmax,
-and writes only the final value accumulation rather than an O(N^2) score
-matrix. `MARIAN_MLX_METAL_ATTENTION=classic` retains the three-kernel score,
-softmax, and value path for compatibility and controlled A/B measurements;
-unsupported head dimensions fall back to it. Attention mode is reported by
-`/info`.
+The current English-to-Chinese graph is a six-layer Transformer encoder and a
+four-layer SSRU decoder with greedy beam-1 decoding and a lexical shortlist.
+The Rust host memory-maps and validates FP32 safetensors, uploads owned model
+storage, and records MPS and embedded MSL commands. Fast math is disabled when
+the MSL source is compiled at startup.
 
-The Flash path submits embedding, all encoder layers, and cross-cache
-projections in one command buffer because it has no quadratic score buffers.
-The classic fallback keeps separate layer submissions to bound its worst-case
-score allocation. The decoder records up to three autoregressive tokens per
-submission; a GPU kernel advances the previous token, EOS state, and output
-history between steps. A command-queue creation or
-execution failure also makes the backend not-ready so the scheduler stops
-admitting work to a failed device.
+FP32 is the default precision contract. The explicit
+`MARIAN_MLX_METAL_PRECISION=mixed-f16` mode stores uploaded model weights in
+FP16 while retaining FP32 activations and reductions; `/info` reports the
+selected precision.
 
-The public backend and Cargo feature are named `metal`. `mlx` remains only as a
-compatibility alias and selects the same implementation. A release does not
-need `libmlx.dylib` or an external `.metallib`: runtime-compiled MSL is embedded
-in the server executable. Use Instruments Metal System Trace to validate GPU
-execution and profile command-buffer or kernel behavior.
+Supported self-attention and single-query cross-attention use a
+FlashAttention-style online-softmax kernel. It streams key/value tiles and
+writes only the final accumulation instead of an O(N^2) score matrix. Classic
+score/softmax/value kernels remain an explicit fallback and A/B path.
+
+The Metal crate is split by reason to change:
+
+| Module | Owns | Does not own |
+|---|---|---|
+| `config` | Public process inputs and environment parsing | Device defaults or graph decisions |
+| `tuning` | Resolved device-family attention, decode, occupancy, and GEMM policy | Environment reads or command encoding |
+| `backend` | Tokenization, segmentation, physical repetition materialization, and result assembly | Metal ABI or generic scheduler policy |
+| `engine.rs` | Model lifetime, request validation, fail-closed health, and encoder/request orchestration | Process configuration parsing or low-level kernel bindings |
+| `engine/model` | Artifact validation and natural packed-weight structures | Decode policy or request state |
+| `engine/decode` | Candidate preparation, output limits, and decode-submission loop | Pipeline objects, ABI parameter layouts, or raw dispatch |
+| `engine/ops` | Checked graph primitives, Metal ABI values, and dispatch geometry | Request admission, decode-loop policy, or artifact parsing |
+| `metal_runtime` | Metal/MPS objects, command buffers, pipelines, matrix views, and device legality | Model graph or request policy |
+| `workspace` | Request/transient arenas and frame lifetime enforcement | Model semantics or tuning values |
+
+Policy flows from `config` through `tuning` and `backend` into the engine;
+mechanism flows from `engine/decode` through `engine/ops` to `metal_runtime` and
+`workspace`. The primitive layer never depends back on decode, and model
+loading never depends on either decode or primitive dispatch. Keep those
+directions when adding a kernel, model format, or device profile.
+
+### Resource lifetimes
+
+Metal storage is classified by graph lifetime, not by the layer that first
+uses it:
+
+| Lifetime | Examples | Reuse rule |
+|---|---|---|
+| Permanent | Model weights, pipelines, permanent MPS matrix views | Retained for the runtime lifetime |
+| Request | Encoded input, encoder output, cross cache, decoder state, request arena | Rewound only when the next inference request begins |
+| Transient | Per-command-buffer intermediates and uploads | Eligible for reuse by the next frame after the active frame completes |
+
+`MetalWorkspace` owns the request and transient arenas. `MetalRuntime` mirrors
+those lifetimes for MPS matrix views: permanent weight views remain cached,
+request-arena views are cleared by `begin_request`, and uncached one-off buffers
+never enter either cache. This prevents a cached view from retaining an old
+arena buffer across requests while keeping stable model views reusable.
+
+### Tuning boundary
+
+`MetalTuning` is resolved once after device selection and centralizes attention,
+GEMM, decode-submission, and duplicate-row policy. Auto detection selects an
+M1, M2, M3, M4, or generic profile; `MARIAN_MLX_METAL_PROFILE` can override it
+for controlled qualification. `/info` includes the active profile with the
+attention label.
+
+The M1 defaults are measured in the v0.6.0 release qualification on the
+documented Apple M1 host. Later-family and generic defaults are conservative
+starting points, not performance claims; they require benchmarks and profiler
+evidence on the corresponding hardware. Individual environment overrides
+remain available for A/B work.
+
+The Flash encoder and cross-cache build can share one command buffer because
+the fused attention path has no quadratic score storage. Classic attention
+keeps bounded fallback submissions. Decode submission length is selected from
+active rows, remaining output budget, completion state, and the tuning profile;
+it is not a hard-coded scheduler concern. Command creation or execution failure
+marks the backend not-ready so admission stops.
+
+The public feature and backend name is `metal`; `mlx` remains a compatibility
+alias for the same implementation. Releases need neither `libmlx.dylib` nor an
+external `.metallib` because the MSL source is embedded in the executable.
 
 ## Adding a language direction
 
-1. Confirm the upstream model's architecture, vocabulary, shortlist, beam,
-   source, and license.
-2. Extend the manifest schema only when the graph actually differs.
+1. Confirm the upstream architecture, vocabulary, shortlist, beam, language
+   identifiers, and license.
+2. Extend the manifest only when the graph contract actually differs.
 3. Add conversion-time shape and checksum validation.
-4. Add a golden corpus against a trusted reference backend.
-5. Add the direction to the runtime registry and scheduler key.
-6. Document quality and memory separately from throughput.
+4. Add a deterministic golden corpus against a trusted reference backend.
+5. Register the direction and verify scheduler-key behavior.
+6. Qualify long-text segmentation, output-budget preservation, quality,
+   memory, and throughput separately.
 
-List a direction only after its runtime and tests are in place.
+List a direction only after its runtime and tests are present.
 
 ## Release boundary
 
-Source, runtime binaries, and model files are tracked separately. Native macOS
-release archives contain one server executable; model files remain separate
-operator downloads. The Rust host and project MSL kernels are MIT.
-Pure-Rust SentencePiece inference comes from the Apache-2.0
-`sentencepiece-rust` crate. The Linux image contains the Rust server and does
-not contain a model; the operator downloads verified model artifacts into a
-separate volume.
+Source, runtime binaries, and model artifacts are versioned separately. Native
+macOS archives contain one server executable; Linux images contain the Rust
+server but no model. Operators download verified model artifacts into separate
+storage. Downloads and activation remain checksum-verified and atomic.
+
+The Rust host and project MSL kernels are MIT. Pure-Rust SentencePiece inference
+comes from the Apache-2.0 `sentencepiece-rust` crate. There is no MLX runtime,
+CXX inference bridge, native tokenizer process, or external CPU worker in the
+production architecture.

@@ -31,7 +31,9 @@ jobs:
         run: |
           python3 tools/generate_corpus.py --output /tmp/corpus-v1.jsonl
           cmp benchmarks/corpus-v1.jsonl /tmp/corpus-v1.jsonl
-          python3 -m py_compile tools/bench_http.py tools/generate_corpus.py
+          python3 -m py_compile tools/bench_http.py tools/generate_corpus.py \
+            tools/summarize_metal_trace.py tools/test_summarize_metal_trace.py
+          python3 tools/test_summarize_metal_trace.py
           cargo check --locked -p marian-cpu --features benchmarks --benches
       - name: Check explicit pure Rust CPU backend
         run: |
@@ -162,5 +164,9 @@ jobs:
         run: rustup show active-toolchain
       - name: Check direct Metal backend
         run: cargo check --locked -p marian-server --features metal
+      - name: Clippy direct Metal backend
+        run: |
+          cargo clippy --locked -p marian-mlx --all-targets --features metal -- -D warnings
+          cargo clippy --locked -p marian-server --all-targets --features metal -- -D warnings
       - name: Test direct Metal crate
         run: cargo test --locked -p marian-mlx --features metal

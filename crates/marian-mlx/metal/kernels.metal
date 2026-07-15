@@ -8,13 +8,12 @@ inline float model_value(device const uchar* values, uint index, uint storage) {
   return float(reinterpret_cast<device const half*>(values)[index]);
 }
 
-constant uint TILE = 16;
 constant uint MATMUL_TILE = 32;
 constant uint MATMUL_INNER_TILE = 16;
 constant uint REDUCTION_THREADS = 128;
+constant uint SELECT_REDUCTION_MAX_THREADS = 512;
 constant uint FLASH_ATTENTION_THREADS = 32;
 constant uint FLASH_ATTENTION_MAX_HEAD_DIM = 64;
-constant uint FLASH_ATTENTION_QUERY_TILE = 4;
 constant float EMBEDDING_SCALE = 19.595917942265423f;
 constant float ATTENTION_SCALE = 0.14433756729740643f;
 
@@ -26,41 +25,6 @@ struct MatMulParams {
   uint activation;
   uint storage;
 };
-
-kernel void matmul_f32(
-    device const float* lhs [[buffer(0)]],
-    device const uchar* rhs [[buffer(1)]],
-    device const uchar* bias [[buffer(2)]],
-    device float* output [[buffer(3)]],
-    constant MatMulParams& p [[buffer(4)]],
-    ushort2 local [[thread_position_in_threadgroup]],
-    uint2 group [[threadgroup_position_in_grid]]) {
-  threadgroup float lhs_tile[TILE][TILE];
-  threadgroup float rhs_tile[TILE][TILE];
-  const uint row = group.y * TILE + local.y;
-  const uint col = group.x * TILE + local.x;
-  float value = 0.0f;
-
-  for (uint start = 0; start < p.inner; start += TILE) {
-    const uint lhs_col = start + local.x;
-    const uint rhs_row = start + local.y;
-    lhs_tile[local.y][local.x] =
-        row < p.rows && lhs_col < p.inner ? lhs[row * p.inner + lhs_col] : 0.0f;
-    rhs_tile[local.y][local.x] =
-        rhs_row < p.inner && col < p.cols
-            ? model_value(rhs, rhs_row * p.cols + col, p.storage) : 0.0f;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint index = 0; index < TILE; ++index) {
-      value += lhs_tile[local.y][index] * rhs_tile[index][local.x];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-  }
-
-  if (row < p.rows && col < p.cols) {
-    value += p.has_bias != 0 ? model_value(bias, col, p.storage) : 0.0f;
-    output[row * p.cols + col] = p.activation != 0 ? max(value, 0.0f) : value;
-  }
-}
 
 // A 32x32 output tile computed by one 256-thread group. Each thread owns four
 // rows in one column, which halves redundant LHS/RHS threadgroup loads versus
@@ -200,13 +164,17 @@ struct NormParams {
   uint storage;
 };
 
-kernel void residual_layer_norm_f32(
-    device const float* input [[buffer(0)]],
-    device const float* residual [[buffer(1)]],
-    device const uchar* scale [[buffer(2)]],
-    device const uchar* bias [[buffer(3)]],
-    device float* output [[buffer(4)]],
-    constant NormParams& p [[buffer(5)]],
+// Fused epilogue for a linear projection followed by residual LayerNorm.
+// The additions deliberately retain Marian's original order:
+// (matrix_product + linear_bias) + residual.
+kernel void bias_residual_layer_norm_f32(
+    device const float* matrix_product [[buffer(0)]],
+    device const uchar* linear_bias [[buffer(1)]],
+    device const float* residual [[buffer(2)]],
+    device const uchar* scale [[buffer(3)]],
+    device const uchar* norm_bias [[buffer(4)]],
+    device float* output [[buffer(5)]],
+    constant NormParams& p [[buffer(6)]],
     uint tid [[thread_index_in_threadgroup]],
     uint row [[threadgroup_position_in_grid]]) {
   if (row >= p.rows) return;
@@ -214,7 +182,9 @@ kernel void residual_layer_norm_f32(
   threadgroup float reduction[REDUCTION_THREADS];
   float local_sum = 0.0f;
   for (uint index = tid; index < p.dim; index += REDUCTION_THREADS) {
-    const float value = input[base + index] + residual[base + index];
+    float value = matrix_product[base + index];
+    value += model_value(linear_bias, index, p.storage);
+    value += residual[base + index];
     output[base + index] = value;
     local_sum += value;
   }
@@ -240,13 +210,14 @@ kernel void residual_layer_norm_f32(
   const float inv_std = rsqrt(reduction[0] / float(p.dim) + 1.0e-6f);
   for (uint index = tid; index < p.dim; index += REDUCTION_THREADS) {
     output[base + index] = (output[base + index] - mean) * inv_std
-        * model_value(scale, index, p.storage) + model_value(bias, index, p.storage);
+        * model_value(scale, index, p.storage)
+        + model_value(norm_bias, index, p.storage);
   }
 }
 
 kernel void ssru_update_layer_norm_f32(
-    device const float* candidate [[buffer(0)]],
-    device const float* forget_pre [[buffer(1)]],
+    device const float* projection [[buffer(0)]],
+    device const uchar* forget_bias [[buffer(1)]],
     device float* state [[buffer(2)]],
     device const float* residual [[buffer(3)]],
     device const uchar* scale [[buffer(4)]],
@@ -261,8 +232,12 @@ kernel void ssru_update_layer_norm_f32(
   float local_sum = 0.0f;
   for (uint index = tid; index < p.dim; index += REDUCTION_THREADS) {
     const uint offset = base + index;
-    const float gate = 1.0f / (1.0f + exp(-forget_pre[offset]));
-    const float next = gate * state[offset] + (1.0f - gate) * candidate[offset];
+    const uint projection_base = row * p.dim * 2;
+    const float candidate = projection[projection_base + index];
+    const float forget_pre = projection[projection_base + p.dim + index]
+        + model_value(forget_bias, index, p.storage);
+    const float gate = 1.0f / (1.0f + exp(-forget_pre));
+    const float next = gate * state[offset] + (1.0f - gate) * candidate;
     state[offset] = next;
     const float value = residual[offset] + max(next, 0.0f);
     output[offset] = value;
@@ -300,6 +275,13 @@ struct AttentionParams {
   uint key_length;
   uint dim;
   uint heads;
+  uint query_stride;
+  uint query_offset;
+  uint key_stride;
+  uint key_offset;
+  uint value_stride;
+  uint value_offset;
+  uint query_tile;
 };
 
 kernel void attention_scores_f32(
@@ -317,10 +299,10 @@ kernel void attention_scores_f32(
   const uint batch = batch_head / p.heads;
   const uint head = batch_head % p.heads;
   const uint head_dim = p.dim / p.heads;
-  const uint query_base = (batch * p.query_length + query_index) * p.dim
-      + head * head_dim;
-  const uint key_base = (batch * p.key_length + key_index) * p.dim
-      + head * head_dim;
+  const uint query_base = (batch * p.query_length + query_index) * p.query_stride
+      + p.query_offset + head * head_dim;
+  const uint key_base = (batch * p.key_length + key_index) * p.key_stride
+      + p.key_offset + head * head_dim;
   float value = 0.0f;
   for (uint index = 0; index < head_dim; ++index) {
     value += queries[query_base + index] * keys[key_base + index];
@@ -389,7 +371,8 @@ kernel void attention_apply_f32(
   float value = 0.0f;
   for (uint key_index = 0; key_index < p.key_length; ++key_index) {
     value += scores[score_base + key_index]
-        * values[(batch * p.key_length + key_index) * p.dim + dim_index];
+        * values[(batch * p.key_length + key_index) * p.value_stride
+            + p.value_offset + dim_index];
   }
   output[(batch * p.query_length + query_index) * p.dim + dim_index] = value;
 }
@@ -409,7 +392,7 @@ kernel void attention_flash_f32(
     constant AttentionParams& p [[buffer(5)]],
     uint tid [[thread_index_in_threadgroup]],
     uint2 group [[threadgroup_position_in_grid]]) {
-  const uint query_start = group.x * FLASH_ATTENTION_QUERY_TILE;
+  const uint query_start = group.x * p.query_tile;
   const uint batch_head = group.y;
   if (query_start >= p.query_length || batch_head >= p.batch * p.heads) return;
 
@@ -418,15 +401,20 @@ kernel void attention_flash_f32(
   const uint head_dim = p.dim / p.heads;
   if (head_dim > FLASH_ATTENTION_MAX_HEAD_DIM) return;
 
-  const bool has_query1 = query_start + 1 < p.query_length;
-  const bool has_query2 = query_start + 2 < p.query_length;
-  const bool has_query3 = query_start + 3 < p.query_length;
+  const bool has_query1 = p.query_tile > 1 && query_start + 1 < p.query_length;
+  const bool has_query2 = p.query_tile > 2 && query_start + 2 < p.query_length;
+  const bool has_query3 = p.query_tile > 3 && query_start + 3 < p.query_length;
   const uint active_keys = min(lengths[batch], p.key_length);
-  const uint query_base0 = (batch * p.query_length + query_start) * p.dim
+  const uint query_base0 = (batch * p.query_length + query_start) * p.query_stride
+      + p.query_offset + head * head_dim;
+  const uint query_base1 = query_base0 + p.query_stride;
+  const uint query_base2 = query_base1 + p.query_stride;
+  const uint query_base3 = query_base2 + p.query_stride;
+  const uint output_base0 = (batch * p.query_length + query_start) * p.dim
       + head * head_dim;
-  const uint query_base1 = query_base0 + p.dim;
-  const uint query_base2 = query_base1 + p.dim;
-  const uint query_base3 = query_base2 + p.dim;
+  const uint output_base1 = output_base0 + p.dim;
+  const uint output_base2 = output_base1 + p.dim;
+  const uint output_base3 = output_base2 + p.dim;
   threadgroup float query0[64];
   threadgroup float query1[64];
   threadgroup float query2[64];
@@ -463,8 +451,8 @@ kernel void attention_flash_f32(
     float score0 = -INFINITY, score1 = -INFINITY;
     float score2 = -INFINITY, score3 = -INFINITY;
     if (tid < tile_keys) {
-      const uint key_base = (batch * p.key_length + start + tid) * p.dim
-          + head * head_dim;
+      const uint key_base = (batch * p.key_length + start + tid) * p.key_stride
+          + p.key_offset + head * head_dim;
       score0 = 0.0f;
       score1 = 0.0f;
       score2 = 0.0f;
@@ -521,8 +509,8 @@ kernel void attention_flash_f32(
 
     if (tid < head_dim) {
       for (uint index = 0; index < tile_keys; ++index) {
-        const uint value_index = (batch * p.key_length + start + index) * p.dim
-            + head * head_dim + tid;
+        const uint value_index = (batch * p.key_length + start + index) * p.value_stride
+            + p.value_offset + head * head_dim + tid;
         const float value = values[value_index];
         low0 += probability0[index] * value;
         low1 += probability1[index] * value;
@@ -533,8 +521,8 @@ kernel void attention_flash_f32(
     const uint high_dimension = tid + FLASH_ATTENTION_THREADS;
     if (high_dimension < head_dim) {
       for (uint index = 0; index < tile_keys; ++index) {
-        const uint value_index = (batch * p.key_length + start + index) * p.dim
-            + head * head_dim + high_dimension;
+        const uint value_index = (batch * p.key_length + start + index) * p.value_stride
+            + p.value_offset + head * head_dim + high_dimension;
         const float value = values[value_index];
         high0 += probability0[index] * value;
         high1 += probability1[index] * value;
@@ -546,67 +534,73 @@ kernel void attention_flash_f32(
   }
 
   if (tid < head_dim) {
-    output[query_base0 + tid] = low0 / sum0;
-    if (has_query1) output[query_base1 + tid] = low1 / sum1;
-    if (has_query2) output[query_base2 + tid] = low2 / sum2;
-    if (has_query3) output[query_base3 + tid] = low3 / sum3;
+    output[output_base0 + tid] = low0 / sum0;
+    if (has_query1) output[output_base1 + tid] = low1 / sum1;
+    if (has_query2) output[output_base2 + tid] = low2 / sum2;
+    if (has_query3) output[output_base3 + tid] = low3 / sum3;
   }
   if (tid + FLASH_ATTENTION_THREADS < head_dim) {
     const uint high_dimension = tid + FLASH_ATTENTION_THREADS;
-    output[query_base0 + high_dimension] = high0 / sum0;
-    if (has_query1) output[query_base1 + high_dimension] = high1 / sum1;
-    if (has_query2) output[query_base2 + high_dimension] = high2 / sum2;
-    if (has_query3) output[query_base3 + high_dimension] = high3 / sum3;
+    output[output_base0 + high_dimension] = high0 / sum0;
+    if (has_query1) output[output_base1 + high_dimension] = high1 / sum1;
+    if (has_query2) output[output_base2 + high_dimension] = high2 / sum2;
+    if (has_query3) output[output_base3 + high_dimension] = high3 / sum3;
   }
 }
 
-struct OutputParams {
+// The output projection is a GEMV over a row-specific lexical shortlist.
+// Keeping selection and decode-state advancement in the same threadgroup
+// avoids materializing the full logits matrix and removes two dependent GPU
+// dispatches per generated token. Each candidate dot product retains the
+// original increasing-dimension accumulation order.
+struct SelectDecodeParams {
   uint batch;
   uint candidates;
   uint dim;
   uint storage;
+  uint step;
+  uint history_step;
+  uint threads;
 };
 
-kernel void output_logits_f32(
+kernel void select_and_advance_decode_f32(
     device const float* decoder [[buffer(0)]],
     device const uchar* embedding [[buffer(1)]],
     device const uchar* bias [[buffer(2)]],
     device const uint* candidate_ids [[buffer(3)]],
     device const uint* candidate_counts [[buffer(4)]],
-    device float* logits [[buffer(5)]],
-    constant OutputParams& p [[buffer(6)]],
-    uint2 gid [[thread_position_in_grid]]) {
-  const uint candidate_index = gid.x;
-  const uint batch = gid.y;
-  if (candidate_index >= p.candidates || batch >= p.batch) return;
-  if (candidate_index >= candidate_counts[batch]) {
-    logits[batch * p.candidates + candidate_index] = -INFINITY;
+    device int* previous [[buffer(5)]],
+    device const uint* limits [[buffer(6)]],
+    device uint* finished [[buffer(7)]],
+    device int* history [[buffer(8)]],
+    constant SelectDecodeParams& p [[buffer(9)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint row [[threadgroup_position_in_grid]]) {
+  if (row >= p.batch) return;
+  const uint history_index = p.history_step * p.batch + row;
+  if (finished[row] != 0 || p.step >= limits[row]) {
+    if (tid == 0) {
+      if (p.step >= limits[row]) finished[row] = 1;
+      history[history_index] = -1;
+    }
     return;
   }
-  const uint token = candidate_ids[batch * p.candidates + candidate_index];
-  float value = model_value(bias, token, p.storage);
-  for (uint index = 0; index < p.dim; ++index) {
-    value += decoder[batch * p.dim + index]
-        * model_value(embedding, token * p.dim + index, p.storage);
-  }
-  logits[batch * p.candidates + candidate_index] = value;
-}
 
-kernel void argmax_f32(
-    device const float* logits [[buffer(0)]],
-    device const uint* candidate_counts [[buffer(1)]],
-    device uint* selected [[buffer(2)]],
-    constant OutputParams& p [[buffer(3)]],
-    uint tid [[thread_index_in_threadgroup]],
-    uint batch [[threadgroup_position_in_grid]]) {
-  if (batch >= p.batch) return;
-  const uint base = batch * p.candidates;
-  threadgroup float values[REDUCTION_THREADS];
-  threadgroup uint indices[REDUCTION_THREADS];
+  threadgroup float values[SELECT_REDUCTION_MAX_THREADS];
+  threadgroup uint indices[SELECT_REDUCTION_MAX_THREADS];
   float best_value = -INFINITY;
   uint best_index = 0xffffffffu;
-  for (uint index = tid; index < candidate_counts[batch]; index += REDUCTION_THREADS) {
-    const float value = logits[base + index];
+  const uint count = candidate_counts[row];
+  const uint decoder_base = row * p.dim;
+  const uint candidate_base = row * p.candidates;
+  for (uint index = tid; index < count; index += p.threads) {
+    const uint token = candidate_ids[candidate_base + index];
+    float value = model_value(bias, token, p.storage);
+    const uint embedding_base = token * p.dim;
+    for (uint dimension = 0; dimension < p.dim; ++dimension) {
+      value += decoder[decoder_base + dimension]
+          * model_value(embedding, embedding_base + dimension, p.storage);
+    }
     if (value > best_value || (value == best_value && index < best_index)) {
       best_value = value;
       best_index = index;
@@ -615,7 +609,7 @@ kernel void argmax_f32(
   values[tid] = best_value;
   indices[tid] = best_index;
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint stride = REDUCTION_THREADS / 2; stride > 0; stride >>= 1) {
+  for (uint stride = p.threads / 2; stride > 0; stride >>= 1) {
     if (tid < stride) {
       const float other_value = values[tid + stride];
       const uint other_index = indices[tid + stride];
@@ -627,35 +621,10 @@ kernel void argmax_f32(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
-  if (tid == 0) selected[batch] = indices[0];
-}
-
-struct AdvanceDecodeParams {
-  uint batch;
-  uint candidates;
-  uint step;
-  uint history_step;
-};
-
-kernel void advance_decode_f32(
-    device const uint* selected [[buffer(0)]],
-    device const uint* candidate_ids [[buffer(1)]],
-    device int* previous [[buffer(2)]],
-    device const uint* limits [[buffer(3)]],
-    device uint* finished [[buffer(4)]],
-    device int* history [[buffer(5)]],
-    constant AdvanceDecodeParams& p [[buffer(6)]],
-    uint row [[thread_position_in_grid]]) {
-  if (row >= p.batch) return;
-  const uint history_index = p.history_step * p.batch + row;
-  if (finished[row] != 0 || p.step >= limits[row]) {
-    if (p.step >= limits[row]) finished[row] = 1;
-    history[history_index] = -1;
-    return;
+  if (tid == 0) {
+    const uint token = candidate_ids[candidate_base + indices[0]];
+    previous[row] = int(token);
+    history[history_index] = int(token);
+    if (token == 0) finished[row] = 1;
   }
-  const uint candidate = selected[row];
-  const uint token = candidate_ids[row * p.candidates + candidate];
-  previous[row] = int(token);
-  history[history_index] = int(token);
-  if (token == 0) finished[row] = 1;
 }

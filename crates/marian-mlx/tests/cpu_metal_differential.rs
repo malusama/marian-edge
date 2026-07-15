@@ -151,8 +151,8 @@ fn cpu_fp32_matches_direct_metal_for_deterministic_corpus() {
             corpus.len()
         );
         assert!(
-            exact >= 160,
-            "mixed-f16 must retain at least 80% exact translations on the deterministic corpus"
+            exact >= 198,
+            "mixed-f16 must retain at least 99% exact translations on the deterministic corpus"
         );
     }
 

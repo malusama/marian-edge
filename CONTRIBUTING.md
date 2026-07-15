@@ -19,6 +19,8 @@ scripts/prepare-enzh-model.sh
 scripts/build-release.sh
 cargo test -p marian-tokenizer --test mozilla_enzh -- --ignored
 cargo test -p marian-mlx --features metal --test golden -- --ignored
+MARIAN_MLX_MODEL_DIR=models/enzh cargo test -p marian-mlx --features metal \
+  --release --test cpu_metal_differential -- --ignored
 cargo test -p marian-cpu --release --test golden -- --ignored
 cargo test -p marian-cpu --release --test q8_golden -- --ignored
 ```
@@ -66,12 +68,14 @@ Before creating a tag:
    version. The `vX.Y.Z` tag must exactly match the workspace version.
 2. Move the relevant `CHANGELOG.md` entries out of `Unreleased`, add the release
    date, and update its comparison links.
-3. Run `make check`, `scripts/package-macos.sh`, and the ignored model-backed
-   golden tests listed above. Verify the packaged archive and its checksums,
-   not only the build tree.
-4. Let CI pass on the release commit before pushing the tag. Confirm the release
-   workflow publishes `marian-mlx-macos-arm64.tar.gz`, `SHA256SUMS`, and
-   `install-macos.sh`, and that their provenance attestations are present.
+3. Run `make check`, `scripts/package-macos.sh`, the Metal profiler parser
+   tests, and the ignored model-backed golden/differential tests listed above.
+   Verify the packaged archive and its checksums, not only the build tree.
+4. Let CI pass on the release commit before pushing the tag. Release tags and
+   assets are immutable: never move a published tag or replace an existing
+   asset. Confirm the workflow publishes `marian-mlx-macos-arm64.tar.gz`,
+   `SHA256SUMS`, and `install-macos.sh`, and that their provenance attestations
+   are present.
 5. Confirm `ghcr.io/malusama/marian-mlx:cpu-X.Y.Z` and the floating `:cpu` tag
    both contain Linux AMD64 and ARM64 manifests built from the tagged commit.
 6. Exercise a fresh pinned macOS install, `/readyz`, `/info`, update, rollback,

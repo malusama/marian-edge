@@ -44,8 +44,8 @@ For a reproducible pinned install:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.5.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.5.0 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.6.0 sh
 ```
 
 `v0.1.1` remains available as the last historical MLX/Bergamot release. Its
@@ -87,7 +87,7 @@ Or without Compose:
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu-0.5.0
+  ghcr.io/malusama/marian-mlx:cpu-0.6.0
 ```
 
 The published image is multi-architecture AMD64/ARM64, non-root, and CPU-only.
@@ -123,8 +123,8 @@ available for a loopback-only personal deployment:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.5.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.5.0 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.6.0 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 For Docker, add `MARIAN_MLX_CORS_ORIGIN: "*"` under `environment` only if required.
@@ -177,12 +177,15 @@ backends.
 | beam search greater than one | not yet; this release uses beam 1 |
 | general language detection | not included |
 
-Each `/imme` list item remains one output item. The Metal source limit is 4,096
-tokens; its default fused attention path has linear score-scratch growth. The
-CPU engine keeps each inference chunk within 255 source pieces plus EOS and a
-bounded padded-attention budget because its encoder attention is quadratic.
-Longer text is split at tokenizer-aware sentence boundaries and
-reassembled in order while preserving separators, including newlines.
+Each `/imme` list item remains one output item. CPU and Metal use the shared
+`marian-core` segmentation policy with exact tokenizer piece counts: each CPU
+segment contains at most 255 source pieces plus EOS, and each Metal segment at
+most 4,095 source pieces plus EOS. Longer text is split at tokenizer-aware
+sentence boundaries and reassembled in order while preserving separators,
+including newlines. Automatic segmentation retains one shared
+`max_output_tokens` budget for the original item. The HTTP contract separately
+limits text to 64 KiB. CPU also bounds padded-attention work because its encoder
+attention is quadratic; fused Metal attention has linear score-scratch growth.
 
 The Q8 backend matches all five release golden translations exactly. On a
 200-item differential corpus it matched the retired CPU reference exactly on
@@ -288,9 +291,12 @@ requests. Concurrency 64 produced essentially no additional throughput and
 roughly doubled median latency. The M1-qualified duplicate-row width defaults
 to 9 and can be overridden with
 `MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH`; this coalesces exact duplicates only
-inside the current dynamic batch and does not cache results. Use FP32 for the
-exact qualified output contract. `mixed-f16` is the memory-first option from
-the earlier precision qualification and differed on 2/200 corpus outputs.
+inside the current dynamic batch and does not cache results. The remaining M1
+defaults are decode row budget 54, at most six steps per submission, 256
+selection threads, and custom FP32 GEMM disabled; `/info` reports the resolved
+profile. Use FP32 for the exact qualified output contract. `mixed-f16` is the
+memory-first option and differed on 2/200 corpus outputs. M2-M4 profiles are
+conservative until measured on those devices.
 
 `mlx` remains accepted as a feature and backend alias for existing automation,
 but it selects the same direct Metal implementation. MSL source is embedded in
@@ -305,15 +311,16 @@ build output stay out of Git.
 
 ## Performance
 
-The direct Metal backend has a commit-pinned M1 result, 200-item parity report,
-peak-memory measurements, and Instruments trace. Under the same formal release
-settings, v0.5.0 reached three-run medians of 599.32 item/s for the repeated
-short request and 165.29 item/s for the 200-item corpus: 11.7% and 35.4% above
-v0.1.0 MLX FP32. Metal FP32 matched CPU FP32 on all 200 deterministic items.
-These are engineering measurements on one Apple M1, not M2-M4 claims. Exact
-commands, model and corpus hashes, latency distributions, Q8 allocation
-results, and the retired MLX baseline are in [the benchmark
-notes](docs/BENCHMARKS.md).
+The v0.6.0 binary and a freshly rebuilt v0.1.0 MLX binary were measured live on
+the same loaded M1 desktop. Three-run medians improved from 486.64 to 546.19
+item/s for 1,000 short requests (+12.2%) and from 116.68 to 149.14 item/s for
+five 200-item corpus requests (+27.8%). Flash q4 was 12.3% and 4.9% faster than
+the same final binary's classic attention path, with identical output hashes.
+Metal FP32 matched CPU FP32 on all 200 deterministic items; a 300-request Metal
+trace completed 40/40 labeled command buffers with zero errors. These are one
+Apple M1's engineering measurements, not M2-M4 claims. Exact runs, historical
+quiet-host peaks, hashes, latency, memory, trace evidence, and commands are in
+[the benchmark notes](docs/BENCHMARKS.md).
 
 ## Security, maintenance, and licensing
 

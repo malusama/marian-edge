@@ -6,8 +6,13 @@
 
 mod backend;
 mod scheduler;
+mod segmenter;
 mod types;
 
 pub use backend::{EchoBackend, TranslationBackend};
 pub use scheduler::{SchedulerConfig, SchedulerStats, StatsSnapshot, Translator};
+pub use segmenter::{
+    MAX_COUNTED_PIECES, MAX_ENCODING_BYTES, MAX_ENCODING_CALLS, MAX_SEGMENTER_INPUT_BYTES,
+    MAX_SEGMENTS, SegmentError, TextSegment, segment_text,
+};
 pub use types::{BackendError, BackendInfo, TranslateError, TranslationInput, TranslationOutput};

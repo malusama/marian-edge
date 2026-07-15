@@ -2,11 +2,12 @@ use std::path::Path;
 
 use marian_core::{
     BackendError, BackendInfo, TranslationBackend, TranslationInput, TranslationOutput,
+    segment_text,
 };
-use marian_cpu::segment_text;
 use marian_model::ModelManifest;
 use marian_tokenizer::Tokenizer;
 
+use crate::MetalConfig;
 use crate::engine::MetalEngine;
 
 const MAX_SOURCE_TOKENS: usize = 4_096;
@@ -30,11 +31,20 @@ pub struct MetalBackend {
     precision: String,
     eos_id: i32,
     device: String,
+    tuning_profile: String,
     duplicate_batch_width: usize,
 }
 
 impl MetalBackend {
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self, BackendError> {
+        let config = MetalConfig::from_env().map_err(BackendError::Model)?;
+        Self::load_with_config(model_dir, &config)
+    }
+
+    pub fn load_with_config(
+        model_dir: impl AsRef<Path>,
+        config: &MetalConfig,
+    ) -> Result<Self, BackendError> {
         let model_dir = std::fs::canonicalize(model_dir.as_ref()).map_err(|error| {
             BackendError::Model(format!(
                 "failed to resolve model directory {}: {error}",
@@ -74,29 +84,20 @@ impl MetalBackend {
             ));
         }
 
-        let engine = MetalEngine::load(&weights, shortlist.as_deref(), &manifest.architecture)
-            .map_err(BackendError::Model)?;
+        let engine = MetalEngine::load(
+            &weights,
+            shortlist.as_deref(),
+            &manifest.architecture,
+            config,
+        )
+        .map_err(BackendError::Model)?;
         engine
             .warmup()
             .map_err(|error| BackendError::Inference(format!("Metal warmup failed: {error}")))?;
         let device = engine.device_name().to_owned();
         let precision = engine.precision().to_owned();
-        let duplicate_batch_width = std::env::var("MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH")
-            .ok()
-            .map(|value| {
-                value.parse::<usize>().map_err(|_| {
-                    BackendError::Model(format!(
-                        "MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH {value:?} is not an integer"
-                    ))
-                })
-            })
-            .transpose()?
-            .unwrap_or(9);
-        if duplicate_batch_width == 0 {
-            return Err(BackendError::Model(
-                "MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH must be at least 1".into(),
-            ));
-        }
+        let tuning_profile = engine.tuning_profile();
+        let duplicate_batch_width = engine.duplicate_batch_width();
 
         Ok(Self {
             engine,
@@ -108,6 +109,7 @@ impl MetalBackend {
             precision,
             eos_id: manifest.architecture.eos_id,
             device,
+            tuning_profile,
             duplicate_batch_width,
         })
     }
@@ -120,20 +122,17 @@ impl TranslationBackend for MetalBackend {
             device: self.device.clone(),
             model: self.model_id.clone(),
             precision: self.precision.clone(),
-            attention: Some(self.engine.attention_label()),
+            attention: Some(format!(
+                "{}; profile={}",
+                self.engine.attention_label(),
+                self.tuning_profile
+            )),
             supports_batching: true,
         }
     }
 
     fn is_ready(&self) -> bool {
         self.engine.is_ready()
-    }
-
-    fn preferred_duplicate_batch_width(&self) -> usize {
-        // MPS GEMM on the qualified M1 has a steep small-row efficiency cliff.
-        // Keep this tunable so deployments can qualify the occupancy knee for
-        // their GPU without changing the public scheduler configuration.
-        self.duplicate_batch_width
     }
 
     fn translate_batch(
@@ -261,6 +260,14 @@ impl TranslationBackend for MetalBackend {
                         "Metal engine returned out-of-range token offsets".into(),
                     ));
                 }
+                let generated_tokens = end - start;
+                remaining[input_index] = remaining[input_index]
+                    .checked_sub(generated_tokens)
+                    .ok_or_else(|| {
+                        BackendError::Inference(
+                            "Metal engine exceeded the original max_output_tokens budget".into(),
+                        )
+                    })?;
                 let ids = output.tokens[start..end]
                     .iter()
                     .copied()
@@ -272,7 +279,6 @@ impl TranslationBackend for MetalBackend {
                     .map_err(|error| BackendError::Inference(error.to_string()))?;
                 planned[input_index][segment_index].translated = Some(text);
                 planned[input_index][segment_index].output_tokens = ids.len();
-                remaining[input_index] = remaining[input_index].saturating_sub(ids.len());
                 positions[input_index] += 1;
             }
         }
@@ -281,15 +287,24 @@ impl TranslationBackend for MetalBackend {
             .into_iter()
             .map(|segments| {
                 let mut text = String::new();
-                let mut input_tokens = 0;
-                let mut output_tokens = 0;
+                let mut input_tokens = 0_usize;
+                let mut output_tokens = 0_usize;
                 for segment in segments {
                     text.push_str(segment.translated.as_deref().ok_or_else(|| {
                         BackendError::Inference("Metal segment was not translated".into())
                     })?);
                     text.push_str(&segment.separator);
-                    input_tokens += segment.input_tokens;
-                    output_tokens += segment.output_tokens;
+                    input_tokens =
+                        input_tokens
+                            .checked_add(segment.input_tokens)
+                            .ok_or_else(|| {
+                                BackendError::Inference("input token count overflowed usize".into())
+                            })?;
+                    output_tokens = output_tokens
+                        .checked_add(segment.output_tokens)
+                        .ok_or_else(|| {
+                            BackendError::Inference("output token count overflowed usize".into())
+                        })?;
                 }
                 Ok(TranslationOutput {
                     text,
@@ -299,6 +314,43 @@ impl TranslationBackend for MetalBackend {
                 })
             })
             .collect()
+    }
+
+    fn translate_batch_with_repetitions(
+        &mut self,
+        inputs: &[TranslationInput],
+        repetitions: &[usize],
+    ) -> Result<Vec<TranslationOutput>, BackendError> {
+        if inputs.len() != repetitions.len() || repetitions.contains(&0) {
+            return Err(BackendError::InvalidInput(
+                "logical batch repetitions are malformed".into(),
+            ));
+        }
+        let physical_rows = repetitions
+            .iter()
+            .map(|&count| count.min(self.duplicate_batch_width))
+            .sum();
+        let mut expanded = Vec::with_capacity(physical_rows);
+        let mut logical_output_indices = Vec::with_capacity(inputs.len());
+        for (input, &count) in inputs.iter().zip(repetitions) {
+            logical_output_indices.push(expanded.len());
+            expanded.extend(std::iter::repeat_n(
+                input.clone(),
+                count.min(self.duplicate_batch_width),
+            ));
+        }
+        let physical_outputs = self.translate_batch(&expanded)?;
+        if physical_outputs.len() != expanded.len() {
+            return Err(BackendError::Inference(format!(
+                "Metal backend returned {} physical outputs for {} rows",
+                physical_outputs.len(),
+                expanded.len()
+            )));
+        }
+        Ok(logical_output_indices
+            .into_iter()
+            .map(|index| physical_outputs[index].clone())
+            .collect())
     }
 }
 

@@ -143,8 +143,7 @@ fn create_translator(
         BackendKind::Auto => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
             {
-                Translator::start(config, move || marian_mlx::MetalBackend::load(model_dir))
-                    .map_err(Into::into)
+                start_metal_translator(config, model_dir)
             }
             #[cfg(all(
                 feature = "cpu",
@@ -168,8 +167,7 @@ fn create_translator(
         BackendKind::Metal => {
             #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
             {
-                Translator::start(config, move || marian_mlx::MetalBackend::load(model_dir))
-                    .map_err(Into::into)
+                start_metal_translator(config, model_dir)
             }
             #[cfg(not(all(target_os = "macos", target_arch = "aarch64", feature = "metal")))]
             {
@@ -194,6 +192,15 @@ fn create_translator(
             }
         }
     }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+fn start_metal_translator(config: SchedulerConfig, model_dir: PathBuf) -> Result<Translator> {
+    let metal_config = marian_mlx::MetalConfig::from_env().map_err(anyhow::Error::msg)?;
+    Translator::start(config, move || {
+        marian_mlx::MetalBackend::load_with_config(model_dir, &metal_config)
+    })
+    .map_err(Into::into)
 }
 
 fn init_tracing(json: bool) {

@@ -5,7 +5,72 @@ Versioning after the first stable release.
 
 ## [Unreleased]
 
-No changes yet.
+## [0.6.0] - 2026-07-16
+
+### Added
+
+- Added public `MetalConfig`, precision/attention/profile enums, and
+  `MetalBackend::load_with_config`; process environment parsing now stops at
+  the configuration boundary.
+- Added explicit M1-M4/generic tuning profiles for Flash query tiles, duplicate
+  occupancy, decode row budget/step cap, selection threads, and custom GEMM
+  routing. `/info` reports every resolved value.
+- Added request/transient `MetalWorkspace` arenas, permanent/request MPS view
+  cache classes, bounded shape caches, startup validation for SIMD width,
+  thread limits, and threadgroup memory, and deterministic tests for profile
+  defaults and overrides.
+- Added labeled Metal command buffers plus an Instruments trace tool that uses
+  an attach-ready handshake and exports submissions, completions, errors, GPU
+  intervals, device metadata, benchmark data, and a compact summary.
+- Added a checked-in Apple M1 release-qualification artifact with live v0.1,
+  v0.5, Flash/classic, correctness, and trace evidence.
+
+### Changed
+
+- Moved tokenizer-aware long-text segmentation into `marian-core`, so CPU and
+  Metal share one policy without a production dependency between backends.
+- Kept scheduler batching backend-neutral: core coalesces logical duplicates
+  and passes repetition counts, while an accelerator decides whether to
+  materialize extra physical rows for device occupancy.
+- Routed bounded multi-item submissions through the scheduler's canonical
+  batch ordering instead of duplicating bucketing policy in the HTTP adapter.
+- Packed encoder QKV, decoder cross K/V, and SSRU W/Wf projections, reducing
+  each group to one matrix multiplication while allowing Flash attention to
+  consume packed strides and offsets directly.
+- Fused output projection bias/residual/layer normalization and fused decoder
+  logits, argmax, token advance, EOS/limit tracking, and history recording.
+- Made decode submission length respond to active rows, remaining budget, and
+  newly observed completion. The qualified M1 profile uses row budget 54, up
+  to six steps, and 256 selection threads.
+- Split the Metal engine into request/encoder orchestration, artifact and
+  packed-weight loading, decode policy, and checked GPU primitives with a
+  one-way dependency direction.
+- Made release assets and versioned CPU images immutable, generated release
+  notes from this changelog, prevented manual container builds from moving
+  stable tags, and added Metal Clippy plus profiler-parser gates to CI/release
+  workflows.
+
+### Fixed
+
+- Fixed Flash query tiles 1 and 2 dispatching overlapping query rows.
+- Fixed long-text output-budget accounting so generated EOS/control tokens do
+  not grant each segment a fresh caller budget.
+- Fixed request MPS views retaining old arena buffers and per-decode history
+  allocations growing to the model's maximum output length.
+- Replaced post-MPS compute-encoder `expect` failures with propagated errors;
+  any failure after request execution begins now marks the backend not-ready,
+  while caller validation errors remain non-fatal.
+- Synchronized Docker and English/Chinese installation metadata with v0.6.0.
+
+### Performance
+
+- On the live Apple M1 comparison, v0.6.0 reached three-run medians of 546.19
+  item/s for 1,000 repeated short requests and 149.14 item/s for five 200-item
+  corpus requests: 12.2% and 27.8% above a freshly rebuilt v0.1.0 MLX binary.
+- Against the same final binary's classic attention path, Flash q4 improved
+  short and corpus throughput by 12.3% and 4.9% with identical output hashes.
+- Metal FP32 matched CPU FP32 on 200/200 deterministic items. A 300-request
+  trace completed 40/40 command buffers with zero GPU errors.
 
 ## [0.5.0] - 2026-07-15
 
@@ -178,7 +243,8 @@ No changes yet.
   `zh`.
 - Rootless launchd installer and CPU-only multi-architecture Docker path.
 
-[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/malusama/marian-mlx/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/malusama/marian-mlx/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/malusama/marian-mlx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/malusama/marian-mlx/compare/v0.2.1...v0.3.0

@@ -32,12 +32,29 @@ verifies the new runtime before stopping the current service, then checks
 `/readyz`; a failed cutover is rolled back.
 
 The qualified M1 throughput settings are maximum batch 16, a 750 us window,
-FP32, Flash `auto`, and the default duplicate width 9. The last value can be
-overridden before service start with
-`MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH`; values must be positive. It controls
-how many identical rows are retained inside one dynamic batch and is not a
-result cache. Re-sweep it on a different Apple GPU instead of assuming the M1
-small-matrix knee applies unchanged.
+about 32 concurrent short requests, FP32, and Flash `auto`. The resolved M1
+profile is `width=9`, `decode-rows=54`, `decode-steps=6`,
+`select-threads=256`, and `custom-gemm-max=0`; `/info` reports these values at
+runtime. No environment overrides are required for production.
+
+For controlled A/B work, every Metal setting is explicit:
+
+| Environment variable | M1 production value | Valid values / purpose |
+|---|---:|---|
+| `MARIAN_MLX_METAL_PRECISION` | `fp32` | `fp32` or explicit `mixed-f16` storage |
+| `MARIAN_MLX_METAL_PROFILE` | `auto` -> `m1` | `auto`, `m1`, `m2`, `m3`, `m4`, `generic` |
+| `MARIAN_MLX_METAL_ATTENTION` | `auto` | `auto`, `classic`, `flash` |
+| `MARIAN_MLX_METAL_FLASH_THRESHOLD` | `1` | Positive self-attention sequence threshold, maximum 4096 |
+| `MARIAN_MLX_METAL_FLASH_QUERY_TILE` | `4` | `1`, `2`, or `4` |
+| `MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH` | `9` | Positive physical occupancy width inside one dynamic batch |
+| `MARIAN_MLX_METAL_DECODE_ROW_BUDGET` | `54` | Positive rows multiplied by steps per submission |
+| `MARIAN_MLX_METAL_DECODE_MAX_STEPS` | `6` | `1` through `8` |
+| `MARIAN_MLX_METAL_DECODE_SELECTION_THREADS` | `256` | `128`, `256`, or `512` |
+| `MARIAN_MLX_METAL_CUSTOM_GEMM_MAX_ROWS` | `0` | `0` disables custom FP32 GEMM; positive values set its row ceiling |
+
+Duplicate width is not a result cache. Re-sweep every device knob on a
+different Apple GPU instead of assuming the M1 knee applies unchanged. M2-M4
+defaults are conservative, not qualified performance claims.
 
 Uninstall the service while preserving the downloaded model:
 

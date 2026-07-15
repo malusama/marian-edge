@@ -1,7 +1,6 @@
-#[path = "../src/segmenter.rs"]
-mod segmenter;
-
-use segmenter::{SegmentError, TextSegment, segment_text};
+use marian_core::{
+    MAX_SEGMENTER_INPUT_BYTES, MAX_SEGMENTS, SegmentError, TextSegment, segment_text,
+};
 
 fn word_pieces(text: &str) -> Result<usize, String> {
     Ok(text.split_whitespace().count())
@@ -207,18 +206,18 @@ fn rejects_zero_limit_encoder_failure_and_unsplitable_scalar() {
 
 #[test]
 fn enforces_input_and_segment_safety_limits() {
-    let oversized = "x".repeat(segmenter::MAX_SEGMENTER_INPUT_BYTES + 1);
+    let oversized = "x".repeat(MAX_SEGMENTER_INPUT_BYTES + 1);
     assert!(matches!(
         segment_text(&oversized, 255, scalar_pieces).unwrap_err(),
         SegmentError::InputTooLarge { .. }
     ));
 
-    let text = "x".repeat(segmenter::MAX_SEGMENTS + 1);
+    let text = "x".repeat(MAX_SEGMENTS + 1);
     let error = segment_text(&text, 1, scalar_pieces).unwrap_err();
     assert!(matches!(
         error,
         SegmentError::TooManySegments {
-            maximum: segmenter::MAX_SEGMENTS
+            maximum: MAX_SEGMENTS
         } | SegmentError::EncodingWorkLimit { .. }
     ));
 }

@@ -1,0 +1,125 @@
+{
+  "schema": "marian-mlx.release-qualification.v1",
+  "release": "v0.6.0",
+  "measured_at_utc": "2026-07-15T18:05:00Z",
+  "host": {
+    "device": "Apple M1",
+    "gpu_cores": 8,
+    "memory_gib": 16,
+    "os": "macOS 26.6 (25G5052e)"
+  },
+  "model": {
+    "id": "mozilla-firefox-translations-en-zh-base-memory",
+    "weights_sha256": "fcd6f7a791293b6f9b6a959b7e9ee856a34d451afecaed2dcb5ac314b47f6967",
+    "corpus_sha256": "41fbef085648815e15bd7ec7261816c9d55c1f04c2489cab3e7550887449de0b"
+  },
+  "candidate": {
+    "base_commit": "3a6c2d9240eaaa2a56135a61b7e7d721de061e36",
+    "reported_version_during_measurement": "0.5.0",
+    "measurement_state": "uncommitted v0.6.0 release candidate",
+    "source_diff_sha256": "ee1cd6d07e735ee30224cb4cc7c20f4817757028d78fbbb86d02062fc18a690d",
+    "binary_sha256": "2cadfcdde18e904e659849077c1323c7b6e6b0686172504fe30cf50861e696a9"
+  },
+  "settings": {
+    "precision": "fp32",
+    "max_batch_size": 16,
+    "batch_window_us": 750,
+    "short_concurrency": 32,
+    "profile": "m1(width=9,decode-rows=54,decode-steps=6,select-threads=256,custom-gemm-max=0)"
+  },
+  "workloads": {
+    "short": {
+      "requests_per_run": 1000,
+      "warmup_per_run": 64
+    },
+    "corpus": {
+      "requests_per_run": 5,
+      "items_per_request": 200,
+      "warmup_per_run": 1
+    }
+  },
+  "comparisons": {
+    "v0.1.0_mlx_fp32": {
+      "revision": "9d7063fe0c4d",
+      "binary_sha256": "7d36937c6019ff426213261d6d949440ea34b0c06c509473408b4f16438c4549",
+      "short_item_per_second": [443.537, 486.635, 528.328],
+      "short_median": {
+        "item_per_second": 486.635,
+        "p50_ms": 66.744,
+        "p95_ms": 77.798,
+        "peak_rss_kib": 205632,
+        "distinct_output_hashes": 1
+      },
+      "corpus_item_per_second": [128.138, 103.742, 116.683],
+      "corpus_median": {
+        "item_per_second": 116.683,
+        "p50_ms": 1622.823,
+        "p95_ms": 2116.158,
+        "peak_rss_kib": 214448,
+        "distinct_output_hashes": 5
+      }
+    },
+    "v0.5.0_direct_metal": {
+      "revision": "6c056a6648b5",
+      "binary_sha256": "2dbbb579f64dd253b8d1764c9e622939014eeaae07e04088f6ceda763cb00cdc",
+      "short_item_per_second": [479.216, 496.143, 521.264],
+      "short_median_item_per_second": 496.143,
+      "corpus_item_per_second": [123.973, 126.488, 126.369],
+      "corpus_median_item_per_second": 126.369
+    },
+    "v0.6.0_flash_auto": {
+      "short_item_per_second": [535.294, 561.437, 546.192],
+      "short_median": {
+        "item_per_second": 546.192,
+        "p50_ms": 63.093,
+        "p95_ms": 68.204,
+        "peak_rss_kib": 252240,
+        "distinct_output_hashes": 1
+      },
+      "corpus_item_per_second": [148.038, 149.140, 149.172],
+      "corpus_median": {
+        "item_per_second": 149.140,
+        "p50_ms": 1336.018,
+        "p95_ms": 1385.141,
+        "peak_rss_kib": 257088,
+        "distinct_output_hashes": 1
+      }
+    },
+    "v0.6.0_classic_attention": {
+      "short_item_per_second": [428.184, 499.404, 486.503],
+      "short_median_item_per_second": 486.503,
+      "corpus_item_per_second": [142.163, 139.517, 144.849],
+      "corpus_median_item_per_second": 142.163
+    }
+  },
+  "correctness": {
+    "release_golden": "pass",
+    "cpu_fp32_vs_metal_fp32_exact": "200/200",
+    "cpu_fp32_vs_metal_mixed_f16_exact": "198/200",
+    "mixed_f16_mismatch_indexes": [116, 192],
+    "flash_vs_classic_output_hashes_equal": true
+  },
+  "metal_trace": {
+    "requests": 300,
+    "submitted_command_buffers": 40,
+    "completed_command_buffers": 40,
+    "errored_command_buffers": 0,
+    "with_gpu_intervals": 40,
+    "without_gpu_intervals": 0,
+    "labels": {
+      "encode+cross-cache": 20,
+      "decode[0..6) active=9": 19,
+      "decode[0..6) active=2": 1
+    },
+    "gpu_active_total_ms": 510.324510,
+    "per_command_buffer_p50_ms": 10.458792,
+    "per_command_buffer_p95_ms": 27.959958
+  },
+  "notes": [
+    "All live comparison runs used the same host, model, HTTP driver, batch settings, and three-run median rule.",
+    "The desktop was under visible Otty and WindowServer load, so paired live comparisons are authoritative; historical quiet-host peaks remain documented separately.",
+    "Peak RSS includes shared-memory and purgeable-page behavior on macOS and is not used as a cross-runtime allocation oracle.",
+    "Only package version metadata and documentation changed between the measured candidate binary and the v0.6.0 release source; inference code did not change.",
+    "Reproduce source_diff_sha256 from the v0.6.0 release commit with: git diff --binary 3a6c2d9240eaaa2a56135a61b7e7d721de061e36 -- crates | shasum -a 256"
+  ]
+}

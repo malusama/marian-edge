@@ -1,4 +1,70 @@
-# FlashAttention and first-version comparison (2026-07-15)
+# Performance qualification
+
+## v0.6.0 live first-version comparison (2026-07-16)
+
+The v0.1.0 tag was rebuilt against its original MLX bridge and run immediately
+before the final direct-Metal release candidate on the same Apple M1 / 16 GB
+host, model, macOS 26.6 installation, HTTP driver, and batching settings. Each
+entry is the median-by-throughput run from three measurements. The desktop was
+under visible Otty and WindowServer load, so these paired live results are the
+comparison boundary; the quieter historical peaks below remain useful but are
+not mixed into this table.
+
+| Runtime | Workload | Throughput | p50 | p95 | Peak RSS | Output hashes/run |
+|---|---|---:|---:|---:|---:|---:|
+| v0.1.0 MLX FP32 | 1,000 short requests | 486.64 item/s | 66.74 ms | 77.80 ms | 205,632 KiB | 1 |
+| v0.6.0 direct Metal FP32 | 1,000 short requests | 546.19 item/s | 63.09 ms | 68.20 ms | 252,240 KiB | 1 |
+| v0.1.0 MLX FP32 | 5 x 200-item corpus | 116.68 item/s | 1622.82 ms | 2116.16 ms | 214,448 KiB | 5 |
+| v0.6.0 direct Metal FP32 | 5 x 200-item corpus | 149.14 item/s | 1336.02 ms | 1385.14 ms | 257,088 KiB | 1 |
+
+The final runtime is 12.2% faster than the first release on repeated short
+traffic and 27.8% faster on 200 distinct items. It is also 10.1% and 18.0%
+faster than a live v0.5.0 binary measured in the same loaded desktop window.
+The v0.1.0 corpus produced a different response hash for every one of its five
+identical request bodies; the final runtime produced one stable hash. Peak RSS
+is recorded for deployment sizing but includes macOS shared-GPU and purgeable
+page behavior, so it is not used as an allocator comparison.
+
+### Final FlashAttention-style A/B
+
+This A/B changes only `MARIAN_MLX_METAL_ATTENTION` in the final binary. Flash
+and classic produced identical output hashes for both workloads.
+
+| Workload | Classic | Flash q4 auto | Throughput change | Flash p50 | Flash p95 |
+|---|---:|---:|---:|---:|---:|
+| 1,000 short requests | 486.50 item/s | 546.19 item/s | +12.3% | 63.09 ms | 68.20 ms |
+| 5 x 200-item corpus | 142.16 item/s | 149.14 item/s | +4.9% | 1336.02 ms | 1385.14 ms |
+
+The kernel streams 32-key tiles, handles query tiles 1/2/4 with online softmax,
+accepts packed QKV/KV strides and offsets, and never materializes the classic
+O(N^2) score matrix. Its low-level oracle covers key lengths 31/32/33 and
+multiple heads/dimensions; real Metal FP32 matched CPU FP32 on 200/200 corpus
+items. Mixed-F16 remained explicit at 198/200, with mismatches 116 and 192.
+
+### Final Metal trace
+
+A 300-request Instruments trace recorded 40 submitted and 40 completed command
+buffers, zero errors, and no command buffer without GPU intervals. Labels show
+20 fused `encode+cross-cache` submissions and 20 six-token decode submissions.
+GPU active time was 510.32 ms; per-command-buffer GPU p50/p95 were 10.46/27.96
+ms. The compact checked-in evidence is
+[`benchmarks/results/v0.6.0-m1.json`](../benchmarks/results/v0.6.0-m1.json);
+`tools/profile_metal.sh` regenerates the trace, exported evidence tables, and
+summary JSON.
+
+The candidate was measured before the package version changed from 0.5.0 to
+0.6.0; the qualification artifact records that state and the measured binary
+hash explicitly. From the v0.6.0 release commit, reproduce its source-diff hash
+with this canonical command. The `crates` scope intentionally binds runtime,
+kernel, manifest, and test changes while excluding later documentation-only
+edits:
+
+```sh
+git diff --binary 3a6c2d9240eaaa2a56135a61b7e7d721de061e36 -- crates \
+  | shasum -a 256
+```
+
+## Historical v0.5.0 qualification (2026-07-15)
 
 The optimized implementation is commit `6c056a6648b5c2581747e89a4aac594094d9b1d8`
 on an Apple M1 / 16 GB host running macOS 26.6. It uses the same Mozilla en-zh
@@ -71,20 +137,33 @@ of the request:
 ## Current M1 deployment sweet spot
 
 The qualified exact-output configuration is FP32, Flash `auto`, maximum batch
-16, a 750 us batching window, and about 32 concurrent short requests. The M1
-duplicate-width default is 9; override it only after a local sweep:
+16, a 750 us batching window, and about 32 concurrent short requests. `/info`
+reports the complete resolved profile:
+
+```text
+m1(width=9,decode-rows=54,decode-steps=6,select-threads=256,custom-gemm-max=0)
+```
+
+The defaults are the deployment setting. Environment overrides exist for
+controlled local sweeps, not as required production configuration:
 
 ```sh
-MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH=9 \
-  target/release/marian-mlx-server --backend metal --model-dir models/enzh \
+target/release/marian-mlx-server --backend metal --model-dir models/enzh \
   --max-batch-size 16 --batch-window-us 750
 ```
 
-The measured duplicate-width sweep, with the three-token decode cap enabled,
-placed the M1 knee at 8-9 retained rows: width 7 fell to 499.53 item/s, width 8
-reached 563.18 item/s, and width 9 reached 592.11 item/s over 600 requests.
-Width 9 is the default. The commit-pinned 1,000-request three-run median above
-is the release comparison, not the shorter tuning sweep.
+| M1 knob | Default | Qualification result |
+|---|---:|---|
+| Flash query tile | 4 | Tiles 1/2/4 pass the classic oracle; q4 wins the production shapes. |
+| Duplicate physical width | 9 | Width 7/8/9 reached 499.53/563.18/592.11 item/s in the focused sweep. |
+| Decode row budget | 54 | Fills up to six steps for nine retained rows without crossing the measured occupancy knee. |
+| Decode maximum steps | 6 | Improves submission amortization; the next submission contracts to one step after newly observed completion. |
+| Selection threads | 256 | Faster than 128 in the corpus sweep; 512 regressed on M1. |
+| Custom FP32 GEMM rows | 0 | The row-9/16 custom microtile paths were slower than shape-cached MPS and remain disabled. |
+
+The 1,000-request three-run median above is the release comparison, not a
+shorter tuning sweep. M2-M4 profiles remain conservative until measured on the
+corresponding hardware.
 
 ### Prior v0.4 precision and concurrency sweep
 

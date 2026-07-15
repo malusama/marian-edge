@@ -35,8 +35,8 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.4.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.4.0 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.6.0 sh
 ```
 
 安装器不需要 root，会校验 Release 和所有模型文件；模型由用户机器直接从
@@ -75,7 +75,7 @@ curl -fsS http://127.0.0.1:3000/info
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu-0.4.0
+  ghcr.io/malusama/marian-mlx:cpu-0.6.0
 ```
 
 发布镜像是 AMD64/ARM64 多架构、非 root、CPU-only。镜像不内置模型；第一次
@@ -106,8 +106,8 @@ CORS 错误，可在只绑定本机的前提下重新运行固定版本安装器
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.4.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.4.0 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.6.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.6.0 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 Docker 可在 `compose.yaml` 的 `environment` 中增加
@@ -145,6 +145,7 @@ curl -fsS http://127.0.0.1:3000/translate \
 | 能力 | 状态 |
 |---|---|
 | Apple Silicon / direct Metal FP32 | 支持 |
+| Apple Silicon / direct Metal mixed-f16 存储 | 显式选择；资格语料中与 FP32 精确一致 198/200 条 |
 | Linux AMD64 / 纯 Rust Q8 CPU | 支持 |
 | Linux ARM64 / 纯 Rust Q8 CPU | 支持，已在 ARM64 实机测试 |
 | 跨平台纯 Rust FP32 CPU | 使用 FP32 manifest 时支持 |
@@ -157,10 +158,13 @@ curl -fsS http://127.0.0.1:3000/translate \
 | beam > 1 | 暂不支持；当前发布模型为 beam 1 |
 | 通用语种识别 | 不包含 |
 
-`/imme` 中每一项仍对应一个输出项。Metal 单条上限为 4096 token。CPU 引擎会
-把每个推理 chunk 控制在 255 个源 piece 加 EOS 以内，并约束 batch 的 padding
-attention 工作量，因为 encoder attention 是平方复杂度。更长的文本会在
-tokenizer 感知的句子边界分段，之后按原顺序拼回并保留包括换行在内的分隔符。
+`/imme` 中每一项仍对应一个输出项。CPU 与 Metal 后端共用 `marian-core` 的长
+文本分段策略，并由各自 tokenizer 提供精确 piece 计数：CPU 每段最多 255 个源
+piece 加 EOS，Metal 每段最多 4095 个源 piece 加 EOS。更长的文本会优先在
+tokenizer 感知的句子边界分段，之后按原顺序拼回并保留包括换行在内的分隔符；
+自动分段不会重置该输入的 `max_output_tokens` 总预算。HTTP 文本大小另受 64 KiB
+请求契约限制。CPU 还会约束 batch 的 padding attention 工作量，因为 encoder
+attention 是平方复杂度。
 
 Q8 后端对 5 条 release golden 全部精确一致。在 200 条差分语料中，与已退役
 CPU 参考实现有 164 条输出精确一致；其余多为接近分数下的 token 选择差异，
@@ -230,8 +234,8 @@ target/release/marian-mlx-server --backend metal --model-dir models/enzh
 
 当前模型默认使用四 query 分块、32 key 流式读取的 FlashAttention-style
 实现，通过在线 softmax 避免写出 O(N^2) attention score 矩阵。`/info` 会报告
-`flash-q4-auto@1`。生产环境保持 `auto` 即可；`classic` 和强制 `flash` 用于
-兼容性验证和 A/B：
+attention 实现与设备 profile。生产环境保持 `auto` 即可；`classic` 和强制
+`flash` 用于兼容性验证和 A/B：
 
 ```sh
 MARIAN_MLX_METAL_ATTENTION=classic \
@@ -244,9 +248,15 @@ MARIAN_MLX_METAL_FLASH_THRESHOLD=1 \
 
 这台 Apple M1 / 16 GB 机器的吞吐甜点是
 `--max-batch-size 16 --batch-window-us 750`，短请求并发约 32。并发增加到 64
-几乎不再提高吞吐，但 p50 大约翻倍。需要严格输出契约时用默认 FP32；内存优先
-可启用 `MARIAN_MLX_METAL_PRECISION=mixed-f16`，实测峰值 RSS 约降低 25%，吞吐
-基本持平，但 200 条语料中有 2 条与 FP32 不同。
+几乎不再提高吞吐，但 p50 大约翻倍。M1 已验证的重复行宽度默认为 9，可用
+`MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH` 覆盖；它只在当前动态 batch 内补足
+Metal 物理占位，不会跨 batch 缓存结果。当前 M1 profile 的重复行宽度、decode
+row budget、单次提交步数和选词线程数分别是 9、54、6、256，自定义 FP32 GEMM
+保持关闭；`/info` 会报告完整解析结果。M2、M3、M4 和 generic profile 目前只是
+保守起点，必须在对应硬件复测后才能称为甜点。需要严格输出契约时用默认 FP32；
+内存优先可启用
+`MARIAN_MLX_METAL_PRECISION=mixed-f16`，此前资格测试中 200 条语料有 2 条与 FP32
+不同。
 
 旧自动化仍可使用 `mlx` feature 或 `--backend mlx`，它们现在只是 direct Metal
 实现的兼容 alias。MSL 源码内嵌在可执行文件里，并在进程启动时通过 Metal
@@ -259,11 +269,14 @@ framework 编译，因此不再需要 `libmlx.dylib`、外置 `.metallib`、MLX 
 
 ## 性能
 
-FlashAttention-style 相对同一 direct Metal runtime 的 classic attention，
-并发短文本吞吐提高 2.8%，200 条语料吞吐提高 3.5%；隔离 encoder 的长序列
-p50 最多降低 26.5%。同条件复测也表明，最初 v0.1.0 的 MLX runtime 在短文本
-上仍然更快；文档不会把 runtime 重写误报成纯性能升级。完整分布、内存、输出
-一致性与历史基线见 [BENCHMARKS](docs/BENCHMARKS.md)。
+v0.6.0 与现场重新构建的 v0.1.0 MLX 在同一台有桌面负载的 M1 上做了三轮中位数
+A/B：1,000 个短请求从 486.64 提升到 546.19 item/s（+12.2%），5 次 200 条不同
+语料从 116.68 提升到 149.14 item/s（+27.8%）。最终二进制的 Flash q4 又分别比
+classic attention 快 12.3% 和 4.9%，输出 hash 一致。Metal FP32 与 CPU FP32 在
+200/200 条确定性语料上精确一致；300 请求 trace 中 40/40 个有标签 command
+buffer 全部完成，GPU error 为 0。这些是 Apple M1 单机工程测量，不代表 M2-M4。
+逐轮结果、历史安静机器峰值、延迟、内存、hash 和 trace 证据见
+[BENCHMARKS](docs/BENCHMARKS.md)。
 
 ## 安全、维护与许可证
 

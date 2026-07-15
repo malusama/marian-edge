@@ -16,7 +16,6 @@ required-features = ["metal"]
 [features]
 default = []
 metal = [
-    "dep:marian-cpu",
     "dep:marian-tokenizer",
     "dep:objc2",
     "dep:objc2-foundation",
@@ -31,7 +30,6 @@ mlx = ["metal"]
 [dependencies]
 half.workspace = true
 marian-core.workspace = true
-marian-cpu = { workspace = true, optional = true }
 marian-model.workspace = true
 marian-tokenizer = { workspace = true, optional = true }
 memmap2.workspace = true
@@ -42,3 +40,6 @@ objc2 = { workspace = true, optional = true }
 objc2-foundation = { workspace = true, optional = true }
 objc2-metal = { workspace = true, optional = true }
 objc2-metal-performance-shaders = { workspace = true, optional = true }
+
+[dev-dependencies]
+marian-cpu.workspace = true

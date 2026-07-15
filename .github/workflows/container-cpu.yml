@@ -9,11 +9,70 @@ permissions:
   contents: read
   packages: write
 
+concurrency:
+  group: container-cpu-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+  release-gate:
+    name: Validate release identity
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      stable: ${{ steps.version.outputs.stable }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - id: version
+        name: Resolve and validate image version
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace_version=$(awk '
+            /^\[workspace.package\]$/ {inside = 1; next}
+            /^\[/ {inside = 0}
+            inside && /^version = / {
+              gsub(/^[^"]*"|".*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+          test -n "$workspace_version"
+
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            [[ "$GITHUB_REF_TYPE" == tag ]]
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            version=${GITHUB_REF_NAME#v}
+            test "$version" = "$workspace_version"
+            awk -v version="$version" '
+              $0 ~ "^## \\[" version "\\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" {
+                found = 1
+              }
+              END { exit found ? 0 : 1 }
+            ' CHANGELOG.md
+            awk -v version="$version" '
+              index($0, "## [" version "]") == 1 { found = 1; next }
+              found && /^## \[/ { exit }
+              found && /^### / { sections += 1 }
+              END { exit sections > 0 ? 0 : 1 }
+            ' CHANGELOG.md
+            docker_version=$(awk -F= '/^ARG VERSION=/{print $2; exit}' Dockerfile)
+            test "$docker_version" = "$version"
+            stable=true
+          else
+            # Manual runs publish a SHA-addressed preview only. They never move
+            # the stable :cpu or immutable :cpu-X.Y.Z tags.
+            version="$workspace_version-dev.$GITHUB_RUN_ID"
+            stable=false
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: release-gate
     strategy:
       fail-fast: false
       matrix:
@@ -43,13 +102,13 @@ jobs:
           provenance: mode=max
           tags: ${{ env.IMAGE }}:build-${{ github.sha }}-${{ matrix.arch }}
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ needs.release-gate.outputs.version }}
             VCS_REF=${{ github.sha }}
           cache-from: type=gha,scope=cpu-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=cpu-${{ matrix.arch }}
 
   manifest:
-    needs: build
+    needs: [release-gate, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -61,12 +120,28 @@ jobs:
       - name: Merge multi-architecture manifest
         shell: bash
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          tags=(--tag "$IMAGE:cpu")
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            tags+=(--tag "$IMAGE:cpu-$version")
+          set -euo pipefail
+          version='${{ needs.release-gate.outputs.version }}'
+          stable='${{ needs.release-gate.outputs.stable }}'
+          if [[ "$stable" == true ]]; then
+            versioned="$IMAGE:cpu-$version"
+            if docker buildx imagetools inspect "$versioned" \
+              >/tmp/existing-image.txt 2>/tmp/existing-image.err; then
+              echo "immutable image $versioned already exists; refusing to replace it" >&2
+              exit 1
+            fi
+            if ! grep -Eqi 'not found|manifest unknown|name unknown' \
+              /tmp/existing-image.err; then
+              cat /tmp/existing-image.err >&2
+              exit 1
+            fi
+            tags=(--tag "$IMAGE:cpu" --tag "$versioned")
+            inspect="$versioned"
+          else
+            inspect="$IMAGE:cpu-build-$GITHUB_SHA"
+            tags=(--tag "$inspect")
           fi
           docker buildx imagetools create "${tags[@]}" \
             "$IMAGE:build-$GITHUB_SHA-amd64" \
             "$IMAGE:build-$GITHUB_SHA-arm64"
-          docker buildx imagetools inspect "$IMAGE:cpu"
+          docker buildx imagetools inspect "$inspect"

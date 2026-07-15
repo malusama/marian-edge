@@ -17,17 +17,24 @@ pub trait TranslationBackend: 'static {
         true
     }
 
-    /// Minimum number of identical rows to retain when the scheduler
-    /// coalesces duplicates inside one dynamic batch. Accelerators may prefer
-    /// a wider matrix even though every retained row produces the same result.
-    fn preferred_duplicate_batch_width(&self) -> usize {
-        1
-    }
-
     fn translate_batch(
         &mut self,
         inputs: &[TranslationInput],
     ) -> Result<Vec<TranslationOutput>, BackendError>;
+
+    /// Translates the unique logical rows in a scheduler batch while exposing
+    /// how many admitted requests each row represents. The default ignores
+    /// repetitions. An accelerator may materialize repeated physical rows to
+    /// reach a device occupancy knee, but must still return one output per
+    /// logical input.
+    fn translate_batch_with_repetitions(
+        &mut self,
+        inputs: &[TranslationInput],
+        repetitions: &[usize],
+    ) -> Result<Vec<TranslationOutput>, BackendError> {
+        debug_assert_eq!(inputs.len(), repetitions.len());
+        self.translate_batch(inputs)
+    }
 }
 
 /// Test/development backend. It is never selected implicitly in production.

@@ -9,6 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use futures_util::future::join_all;
 use tokio::sync::{Notify, oneshot};
 
 use crate::{
@@ -288,6 +289,38 @@ impl Translator {
         }
     }
 
+    /// Submits a bounded logical group using the scheduler's canonical batch
+    /// key, then restores caller order. Protocol layers should use this rather
+    /// than duplicating source-length bucketing policy.
+    pub async fn translate_many(
+        &self,
+        inputs: Vec<TranslationInput>,
+    ) -> Result<Vec<TranslationOutput>, TranslateError> {
+        let mut indexed = inputs.into_iter().enumerate().collect::<Vec<_>>();
+        indexed.sort_by(|(_, left), (_, right)| left.batch_key().cmp(&right.batch_key()));
+        let tasks = indexed.into_iter().map(|(index, input)| {
+            let translator = self.clone();
+            async move {
+                translator
+                    .translate(input)
+                    .await
+                    .map(|output| (index, output))
+            }
+        });
+        let results = join_all(tasks).await;
+        let mut ordered = std::iter::repeat_with(|| None)
+            .take(results.len())
+            .collect::<Vec<_>>();
+        for result in results {
+            let (index, output) = result?;
+            ordered[index] = Some(output);
+        }
+        Ok(ordered
+            .into_iter()
+            .map(|output| output.expect("every translate_many task returned its input index"))
+            .collect())
+    }
+
     pub async fn shutdown(&self) {
         if self.inner.closed.swap(true, Ordering::AcqRel) {
             return;
@@ -456,35 +489,27 @@ fn worker_loop<B: TranslationBackend>(
         stats.in_flight.fetch_add(batch_size, Ordering::Relaxed);
         stats.largest_batch.fetch_max(batch_size, Ordering::Relaxed);
 
-        // Coalesce byte-for-byte identical requests within this dynamic batch.
-        // This is deliberately not a cross-batch cache: every backend call
-        // remains fresh, while repeated page fragments or concurrent retries
-        // avoid redundant tokenization and inference.
-        let duplicate_width = backend
-            .preferred_duplicate_batch_width()
-            .clamp(1, jobs.len());
+        // Coalesce byte-for-byte identical logical requests inside this batch.
+        // Repetition counts let a backend restore physical rows for occupancy
+        // without leaking device geometry into the scheduler.
         let mut unique_inputs = Vec::with_capacity(jobs.len());
         let mut unique_by_input = HashMap::with_capacity(jobs.len());
+        let mut repetitions = Vec::with_capacity(jobs.len());
         let mut output_indices = Vec::with_capacity(jobs.len());
         for job in &jobs {
-            let index = if let Some((first_index, retained)) = unique_by_input.get_mut(&job.input) {
-                if *retained < duplicate_width {
-                    let index = unique_inputs.len();
-                    unique_inputs.push(job.input.clone());
-                    *retained += 1;
-                    index
-                } else {
-                    *first_index
-                }
+            let index = if let Some(&index) = unique_by_input.get(&job.input) {
+                repetitions[index] += 1;
+                index
             } else {
                 let index = unique_inputs.len();
                 unique_inputs.push(job.input.clone());
-                unique_by_input.insert(job.input.clone(), (index, 1_usize));
+                repetitions.push(1_usize);
+                unique_by_input.insert(job.input.clone(), index);
                 index
             };
             output_indices.push(index);
         }
-        let result = backend.translate_batch(&unique_inputs);
+        let result = backend.translate_batch_with_repetitions(&unique_inputs, &repetitions);
         let backend_ready = backend.is_ready();
         if !backend_ready {
             // Publish the failed state before replying or draining so new
@@ -556,7 +581,7 @@ fn fail_pending(
 mod tests {
     use std::{
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
         },
         thread,
@@ -581,6 +606,52 @@ mod tests {
 
     struct CountingBackend {
         inferred_inputs: Arc<AtomicUsize>,
+    }
+
+    type RepetitionRecord = Vec<(Vec<String>, Vec<usize>)>;
+
+    struct RepetitionBackend {
+        records: Arc<Mutex<RepetitionRecord>>,
+    }
+
+    impl TranslationBackend for RepetitionBackend {
+        fn info(&self) -> BackendInfo {
+            BackendInfo {
+                name: "repetition-test".into(),
+                device: "none".into(),
+                model: "test".into(),
+                precision: "n/a".into(),
+                attention: None,
+                supports_batching: true,
+            }
+        }
+
+        fn translate_batch(
+            &mut self,
+            inputs: &[TranslationInput],
+        ) -> Result<Vec<TranslationOutput>, BackendError> {
+            self.translate_batch_with_repetitions(inputs, &vec![1; inputs.len()])
+        }
+
+        fn translate_batch_with_repetitions(
+            &mut self,
+            inputs: &[TranslationInput],
+            repetitions: &[usize],
+        ) -> Result<Vec<TranslationOutput>, BackendError> {
+            self.records.lock().unwrap().push((
+                inputs.iter().map(|input| input.text.clone()).collect(),
+                repetitions.to_vec(),
+            ));
+            Ok(inputs
+                .iter()
+                .map(|input| TranslationOutput {
+                    text: input.text.clone(),
+                    score: None,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                })
+                .collect())
+        }
     }
 
     impl TranslationBackend for CountingBackend {
@@ -774,6 +845,92 @@ mod tests {
         }
         assert_eq!(translator.stats().snapshot().largest_batch, 8);
         assert_eq!(inferred_inputs.load(Ordering::Relaxed), 1);
+        translator.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduler_reports_interleaved_repetitions_without_device_policy() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let backend_records = Arc::clone(&records);
+        let translator = Arc::new(
+            Translator::start(
+                SchedulerConfig {
+                    max_batch_size: 8,
+                    batch_window: Duration::from_millis(50),
+                    ..SchedulerConfig::default()
+                },
+                move || {
+                    Ok(RepetitionBackend {
+                        records: backend_records,
+                    })
+                },
+            )
+            .unwrap(),
+        );
+        let texts = ["a", "b", "a", "c", "b", "a", "c", "c"];
+        let tasks = texts.map(|text| {
+            let translator = Arc::clone(&translator);
+            tokio::spawn(async move {
+                translator
+                    .translate(TranslationInput::new(text, "en", "zh"))
+                    .await
+                    .unwrap()
+            })
+        });
+        for (task, expected) in tasks.into_iter().zip(texts) {
+            assert_eq!(task.await.unwrap().text, expected);
+        }
+
+        assert_eq!(
+            records.lock().unwrap().as_slice(),
+            &[(vec!["a".into(), "b".into(), "c".into()], vec![3, 2, 3])]
+        );
+        translator.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_coalescing_never_crosses_dynamic_batch_boundaries() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let backend_records = Arc::clone(&records);
+        let translator = Arc::new(
+            Translator::start(
+                SchedulerConfig {
+                    max_batch_size: 4,
+                    batch_window: Duration::from_millis(50),
+                    ..SchedulerConfig::default()
+                },
+                move || {
+                    Ok(RepetitionBackend {
+                        records: backend_records,
+                    })
+                },
+            )
+            .unwrap(),
+        );
+        for _ in 0..2 {
+            let tasks = (0..4)
+                .map(|_| {
+                    let translator = Arc::clone(&translator);
+                    tokio::spawn(async move {
+                        translator
+                            .translate(TranslationInput::new("same", "en", "zh"))
+                            .await
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            for task in tasks {
+                assert_eq!(task.await.unwrap().text, "same");
+            }
+        }
+
+        assert_eq!(
+            records.lock().unwrap().as_slice(),
+            &[
+                (vec!["same".into()], vec![4]),
+                (vec!["same".into()], vec![4])
+            ]
+        );
         translator.shutdown().await;
     }
 
