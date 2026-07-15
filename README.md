@@ -43,8 +43,8 @@ For a reproducible pinned install:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.1/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.2.1 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.3.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.3.0 sh
 ```
 
 `v0.1.1` remains available as the last historical MLX/Bergamot release. Its
@@ -122,8 +122,8 @@ available for a loopback-only personal deployment:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.1/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.2.1 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.3.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.3.0 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 For Docker, add `MARIAN_MLX_CORS_ORIGIN: "*"` under `environment` only if required.
@@ -163,6 +163,7 @@ backends.
 | Capability | Status |
 |---|---|
 | macOS Apple Silicon / direct Metal FP32 | supported |
+| macOS Apple Silicon / direct Metal mixed-f16 storage | explicit opt-in; 198/200 exact against FP32 in the qualification corpus |
 | Linux AMD64 / pure-Rust Q8 CPU | supported |
 | Linux ARM64 / pure-Rust Q8 CPU | supported; tested on ARM64 |
 | portable pure-Rust FP32 CPU | supported with an FP32 manifest |
@@ -212,7 +213,7 @@ many HTTP requests
 Backend state stays on one owner thread. CPU dense operations retain Q8 weights
 or use FP32 weights according to the model manifest. See [architecture and
 maintenance](docs/ARCHITECTURE.md).
-Measured M1-first follow-up work is tracked in the
+Measured M1-first follow-up work and hardware-validation boundaries are recorded in the
 [optimization roadmap](docs/OPTIMIZATION_ROADMAP.md).
 
 ## Build from source
@@ -250,6 +251,20 @@ cargo build --locked --release -p marian-server --features metal
 target/release/marian-mlx-server --backend metal --model-dir models/enzh
 ```
 
+FP32 is the default Metal precision contract. An explicit mixed-precision
+storage mode converts model weights to FP16 on upload while retaining FP32
+activations and reductions:
+
+```sh
+MARIAN_MLX_METAL_PRECISION=mixed-f16 \
+  target/release/marian-mlx-server --backend metal --model-dir models/enzh
+```
+
+The opt-in mode reports `mixed-f16` from `/info`; it does not silently replace
+FP32. It matched 198/200 translations exactly in the deterministic CPU-FP32
+versus Metal corpus, so deployments that require the FP32 token contract must
+leave the variable unset.
+
 `mlx` remains accepted as a feature and backend alias for existing automation,
 but it selects the same direct Metal implementation. MSL source is embedded in
 the executable and compiled through the Metal framework at process startup, so
@@ -263,10 +278,13 @@ build output stay out of Git.
 
 ## Performance
 
-The previously published M1 numbers measured the retired MLX backend and must
-not be read as direct Metal results. The new backend needs a fresh parity,
-throughput, latency, memory, and Metal-trace run before a current performance
-claim is published. The historical baseline and required methodology are in
+The direct Metal backend now has a commit-pinned M1 result, 200-item parity
+report, peak-memory measurements, and Instruments trace. On that run, explicit
+mixed-f16 storage improved single-sentence throughput by 23.4% and reduced
+peak RSS by 25.2% versus direct Metal FP32; corpus throughput improved 4.2% and
+peak RSS fell 35.2%. These are engineering measurements on one Apple M1, not
+M2-M4 claims. Exact commands, model and corpus hashes, latency distributions,
+Q8 allocation results, and the retired MLX baseline are in
 [the benchmark notes](docs/BENCHMARKS.md).
 
 ## Security, maintenance, and licensing

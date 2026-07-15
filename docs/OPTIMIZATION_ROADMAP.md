@@ -38,6 +38,29 @@ were 937.7/1354.5/1243.9 ms, with sampled peak RSS around
 the current Rayon overhead at higher thread counts, so one thread remains the
 default. These are engineering measurements, not published product claims.
 
+## Implementation status (commit `6fdcf8d1f681`)
+
+Every item below has been implemented or evaluated. Hardware-specific claims
+remain deliberately separate from code completion.
+
+| Roadmap item | Status | Result / boundary |
+|---|---|---|
+| P0 deterministic measurements | complete | Checked-in 200-item corpus and generator; metadata-complete HTTP driver; JSON microbenchmarks; Arm64/AMD64 container smoke; segmented output-budget tests. |
+| P1 Q8 allocation/data flow | complete | Engine-owned linear scratch, reusable tensor/attention/shortlist buffers, direct embedding dequantization, `run_into` APIs, and measured Rayon thresholds. |
+| P1 Q8 representation cost | complete | Runtime reports canonical, packed, and embedding bytes plus packed-build time; real artifact result is recorded in `BENCHMARKS.md`. |
+| P1 direct Metal | complete on M1 | Existing tiled matmul retained; FFN bias+ReLU fused; reusable buffer arena; long-text semantics unified; explicit mixed-f16 storage mode; current Metal System Trace captured. |
+| M2/M3/M4 Metal tile tuning | hardware validation pending | The implementation and trace tooling are ready, but an M1 cannot establish family-specific optimum tile sizes. Do not copy the M1 result into M2-M4 claims. |
+| P2 Arm exact SIMD | complete | NEON exact-order residual addition plus every-tail tests. Floating-point reduction loops remain scalar until a reviewed tolerance permits reordering. |
+| P2 x86-64 | code complete; native performance pending | Exact widening AVX2, scalar fallback, tail oracle, and output-work threshold are covered. CI proves native startup; native AMD64 performance and optional VNNI/AVX-512 still require corresponding hardware. |
+| P3 read-only mapping | complete | FP32 safetensors and Q8 artifacts load through read-only mmap, then move into owned CPU or Metal storage. |
+| P3 checksum metadata cache | evaluated, not shipped | Skipping a full hash without a trusted external identity would weaken startup validation, violating the merge constraint. Downloads and activation remain atomic. |
+| P3 serialized packed cache | evaluated, not shipped | `rten-gemm 0.21` exposes no safe public constructor for a serialized `PackedBMatrix`; startup build time is measured instead of introducing an unsupported binary format. |
+
+The next performance work is therefore evidence collection on additional
+hardware, not an unimplemented generic optimization item. The current M1
+results, quality deltas, and profiler evidence are in
+[`BENCHMARKS.md`](BENCHMARKS.md).
+
 ## P0: keep measurements and output contracts reproducible
 
 Before changing arithmetic or allocation strategy:
@@ -63,8 +86,16 @@ MARIAN_CPU_MODEL_DIR=models/enzh \
 cargo +1.86.0 test --locked --release -p marian-cpu \
   --test q8_golden -- --ignored --nocapture
 
-tools/bench_http.py --url http://127.0.0.1:3000/translate \
-  --requests 500 --concurrency 1
+python3 tools/bench_http.py --url http://127.0.0.1:3000/translate \
+  --requests 500 --concurrency 1 --warmup 32 \
+  --model-dir models/enzh --pid "$(lsof -tiTCP:3000 -sTCP:LISTEN)" \
+  --commit "$(git rev-parse HEAD)" --output benchmark.json
+
+cargo +1.86.0 bench --locked -p marian-cpu \
+  --features benchmarks --bench hotspots
+
+tools/profile_metal.sh \
+  http://127.0.0.1:3000/translate /tmp/marian-metal.trace
 ```
 
 ## P1: M1/M-series Q8 CPU allocation and data flow

@@ -84,9 +84,13 @@ Important invariants:
 The backend implements the graph used by the current English-to-Chinese
 Mozilla `base-memory` model: a six-layer Transformer encoder, a four-layer
 SSRU decoder, greedy beam-1 decoding, and a lexical shortlist. The Rust host
-loads and validates FP32 safetensors, records direct Metal compute commands,
-and keeps model buffers, decoder state, and pipeline states on its owner
-thread. The manifest and artifact checksums are validated before loading.
+memory-maps and validates FP32 safetensors, records direct Metal compute
+commands, and keeps model buffers, a reusable buffer arena, decoder state, and
+pipeline states on its owner thread. The manifest and artifact checksums are
+validated before loading. FP32 model storage is the default; the explicit
+`MARIAN_MLX_METAL_PRECISION=mixed-f16` mode converts uploaded model storage to
+FP16 while leaving activations and reductions in FP32, and reports that mode
+through `/info`.
 Embedding and each encoder layer are submitted separately so a retained Metal
 command buffer cannot keep all six quadratic attention-score allocations alive
 at once. Do not merge those submissions without measuring worst-case source

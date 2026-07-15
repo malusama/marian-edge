@@ -7,6 +7,43 @@ Versioning after the first stable release.
 
 No changes yet.
 
+## [0.3.0] - 2026-07-15
+
+### Added
+
+- Added a checked-in deterministic 200-item corpus, reproducible HTTP benchmark
+  driver, CPU hotspot microbenchmarks, and a repeatable Instruments Metal
+  System Trace helper.
+- Added an explicit `MARIAN_MLX_METAL_PRECISION=mixed-f16` Metal model-storage
+  mode. FP32 remains the default; the selected precision is exposed by
+  `/info`, and the qualification test reports corpus-level token differences.
+- Added Q8 memory reporting for canonical weights, packed weights, embeddings,
+  and packed-weight construction time.
+
+### Changed
+
+- Reused Q8 activation, accumulator, decoder, attention, shortlist, and tensor
+  buffers; added allocation-free `run_into` paths and direct embedding-row
+  dequantization.
+- Added exact-order NEON/AVX2 residual addition, exact SIMD tail coverage, and
+  measured work thresholds that keep small decoder GEMV on the owner thread.
+- Reused Metal buffers across decoder steps, fused FFN bias and ReLU into the
+  matrix kernel, and aligned Metal long-text segmentation and output-budget
+  behavior with the CPU backend.
+- Load FP32 safetensors and Q8 artifacts through read-only memory maps before
+  transferring data into owned runtime storage.
+- Made local builds refresh the embedded Git revision after the current branch
+  advances, so `/info` does not retain a stale cached commit.
+
+### Performance
+
+- On the documented Apple M1 run, explicit mixed-f16 storage improved direct
+  Metal throughput by 23.4% for the concurrent single-sentence workload and
+  4.2% for the 200-item corpus while reducing peak RSS by 25.2% and 35.2%.
+- Q8 allocation changes kept measured throughput effectively flat while
+  reducing peak RSS by 21.3% for the warm single-sentence run and 4.7% for the
+  200-item corpus.
+
 ## [0.2.1] - 2026-07-15
 
 ### Fixed
@@ -76,7 +113,8 @@ No changes yet.
   `zh`.
 - Rootless launchd installer and CPU-only multi-architecture Docker path.
 
-[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/malusama/marian-mlx/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/malusama/marian-mlx/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/malusama/marian-mlx/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/malusama/marian-mlx/compare/v0.1.0...v0.1.1
