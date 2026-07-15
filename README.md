@@ -44,8 +44,8 @@ For a reproducible pinned install:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.4.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.4.0 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.5.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.5.0 sh
 ```
 
 `v0.1.1` remains available as the last historical MLX/Bergamot release. Its
@@ -87,7 +87,7 @@ Or without Compose:
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu-0.4.0
+  ghcr.io/malusama/marian-mlx:cpu-0.5.0
 ```
 
 The published image is multi-architecture AMD64/ARM64, non-root, and CPU-only.
@@ -123,8 +123,8 @@ available for a loopback-only personal deployment:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.4.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.4.0 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.5.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.5.0 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 For Docker, add `MARIAN_MLX_CORS_ORIGIN: "*"` under `environment` only if required.
@@ -285,9 +285,12 @@ MARIAN_MLX_METAL_FLASH_THRESHOLD=1 \
 On the measured Apple M1 / 16 GB host, the deployment throughput knee is
 `--max-batch-size 16 --batch-window-us 750` with about 32 concurrent short
 requests. Concurrency 64 produced essentially no additional throughput and
-roughly doubled median latency. Use FP32 for the exact qualified output
-contract. `mixed-f16` is the memory-first option: it reduced peak RSS by about
-25% with effectively flat throughput, but differed on 2/200 corpus outputs.
+roughly doubled median latency. The M1-qualified duplicate-row width defaults
+to 9 and can be overridden with
+`MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH`; this coalesces exact duplicates only
+inside the current dynamic batch and does not cache results. Use FP32 for the
+exact qualified output contract. `mixed-f16` is the memory-first option from
+the earlier precision qualification and differed on 2/200 corpus outputs.
 
 `mlx` remains accepted as a feature and backend alias for existing automation,
 but it selects the same direct Metal implementation. MSL source is embedded in
@@ -303,14 +306,14 @@ build output stay out of Git.
 ## Performance
 
 The direct Metal backend has a commit-pinned M1 result, 200-item parity report,
-peak-memory measurements, and Instruments trace. Fused attention improved the
-current direct-Metal runtime by 2.8% on concurrent short requests and 3.5% on
-the corpus; encoder-isolated long-sequence p50 improved by up to 26.5%. A new
-same-settings comparison also records that the first v0.1.0 MLX runtime remains
-faster on these short workloads. These are engineering measurements on one
-Apple M1, not M2-M4 claims. Exact commands, model and corpus hashes, latency
-distributions, Q8 allocation results, and the retired MLX baseline are in
-[the benchmark notes](docs/BENCHMARKS.md).
+peak-memory measurements, and Instruments trace. Under the same formal release
+settings, v0.5.0 reached three-run medians of 599.32 item/s for the repeated
+short request and 165.29 item/s for the 200-item corpus: 11.7% and 35.4% above
+v0.1.0 MLX FP32. Metal FP32 matched CPU FP32 on all 200 deterministic items.
+These are engineering measurements on one Apple M1, not M2-M4 claims. Exact
+commands, model and corpus hashes, latency distributions, Q8 allocation
+results, and the retired MLX baseline are in [the benchmark
+notes](docs/BENCHMARKS.md).
 
 ## Security, maintenance, and licensing
 

@@ -7,6 +7,38 @@ Versioning after the first stable release.
 
 No changes yet.
 
+## [0.5.0] - 2026-07-15
+
+### Added
+
+- Added shape-cached Metal Performance Shaders FP32 matrix multiplication and
+  a 32x32 custom mixed-F16 microtile kernel.
+- Added `MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH`; the qualified M1 default
+  retains nine identical rows to balance exact batch coalescing with small
+  MPS-matrix occupancy.
+
+### Changed
+
+- Submit the complete Flash encoder and cross-cache build together, reuse
+  encoder, decoder, cross-cache, and CPU-upload Metal buffers, and cache safe
+  MPS matrix views for persistent weights and arenas.
+- Decode up to three autoregressive tokens per command-buffer submission while
+  keeping token selection, EOS tracking, and decoder state on the GPU.
+- Coalesce exact duplicate inputs only within the current dynamic batch; no
+  result is cached across batches.
+- Group Immersive Translate items by the scheduler's source-length buckets,
+  enqueue the complete bounded request together, and restore original response
+  order after translation.
+
+### Performance
+
+- On the qualified Apple M1 / 16 GB host, the same 1,000-request FP32 workload
+  reached a three-run median of 599.32 item/s, 11.7% above v0.1.0 MLX FP32 and
+  83.8% above v0.4.0 direct Metal.
+- The same 10 x 200-item corpus reached 165.29 item/s, 35.4% above v0.1.0 and
+  105.5% above v0.4.0. CPU FP32 and Metal FP32 remained exact on 200/200
+  deterministic corpus items.
+
 ## [0.4.0] - 2026-07-15
 
 ### Added
@@ -146,7 +178,8 @@ No changes yet.
   `zh`.
 - Rootless launchd installer and CPU-only multi-architecture Docker path.
 
-[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/malusama/marian-mlx/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/malusama/marian-mlx/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/malusama/marian-mlx/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/malusama/marian-mlx/compare/v0.2.0...v0.2.1

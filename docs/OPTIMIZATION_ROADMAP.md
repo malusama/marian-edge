@@ -42,7 +42,7 @@ were 937.7/1354.5/1243.9 ms, with sampled peak RSS around
 the current Rayon overhead at higher thread counts, so one thread remains the
 default. These are engineering measurements, not published product claims.
 
-## Implementation status (commit `79e81466f418`)
+## Implementation status (commit `6c056a6648b5`)
 
 Every item below has been implemented or evaluated. Hardware-specific claims
 remain deliberately separate from code completion.
@@ -52,8 +52,9 @@ remain deliberately separate from code completion.
 | P0 deterministic measurements | complete | Checked-in 200-item corpus and generator; metadata-complete HTTP driver; JSON microbenchmarks; Arm64/AMD64 container smoke; segmented output-budget tests. |
 | P1 Q8 allocation/data flow | complete | Engine-owned linear scratch, reusable tensor/attention/shortlist buffers, direct embedding dequantization, `run_into` APIs, and measured Rayon thresholds. |
 | P1 Q8 representation cost | complete | Runtime reports canonical, packed, and embedding bytes plus packed-build time; real artifact result is recorded in `BENCHMARKS.md`. |
-| P1 direct Metal | complete on M1 | Existing tiled matmul retained; FFN bias+ReLU fused; reusable buffer arena; long-text semantics unified; explicit mixed-f16 storage mode; current Metal System Trace captured. |
+| P1 direct Metal | complete on M1 | MPS FP32 GEMM plus a 32x32 mixed-F16 microtile; fused Flash encoder submission; three-token GPU-resident decode chunks; persistent encoder/decoder/cross/upload arenas; cached persistent MPS views; current Metal System Trace captured. |
 | P1 fused attention | complete on M1 | Four-query/32-key tiled Metal kernel, online softmax, no O(N^2) score buffer, padding coverage, classic fallback, environment-controlled A/B path, real-model corpus qualification. |
+| P1 dynamic batching | complete on M1 | Exact duplicates coalesce only within one dynamic batch while retaining the measured nine-row MPS occupancy floor; `/imme` submits source-length buckets together and restores original order. |
 | M2/M3/M4 Metal tile tuning | hardware validation pending | The implementation and trace tooling are ready, but an M1 cannot establish family-specific optimum tile sizes. Do not copy the M1 result into M2-M4 claims. |
 | P2 Arm/x86 safe FP32 SIMD | complete | NEON and runtime-gated AVX2 bias, ReLU, SSRU residual, softmax scaling, and attention-value accumulation with every-tail tests. Dot, sigmoid, softmax-sum, and normalization reductions remain scalar by correctness contract. |
 | P2 x86-64 | code complete; native performance pending | Exact widening AVX2, scalar fallback, tail oracle, and output-work threshold are covered. CI proves native startup; native AMD64 performance and optional VNNI/AVX-512 still require corresponding hardware. |
@@ -61,7 +62,10 @@ remain deliberately separate from code completion.
 | P3 checksum metadata cache | evaluated, not shipped | Skipping a full hash without a trusted external identity would weaken startup validation, violating the merge constraint. Downloads and activation remain atomic. |
 | P3 serialized packed cache | evaluated, not shipped | `rten-gemm 0.21` exposes no safe public constructor for a serialized `PackedBMatrix`; startup build time is measured instead of introducing an unsupported binary format. |
 
-All implementation items that can be qualified on the current M1 are complete.
+All implementation items that can be qualified on the current M1 are complete,
+and both formal v0.1.0 performance workloads are now exceeded: 599.32 item/s
+for the repeated short request and 165.29 item/s for the distinct 200-item
+corpus.
 The remaining entries are hardware-specific validation or new arithmetic
 contracts: M2-M4 tile selection, native AMD64 measurements, optional VNNI or
 AVX-512 kernels, and any reduction-order change. Those cannot be honestly

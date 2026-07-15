@@ -69,6 +69,11 @@ one OS thread per loaded model. This avoids unsafe cross-thread GPU objects and
 uncontrolled weight duplication. Requests enter a bounded queue and compatible
 items are collected for a short window. Batch membership is based on direction,
 maximum output length, and a power-of-two source-length bucket.
+Byte-for-byte duplicate inputs inside that one batch may share an inference
+result; there is no cross-batch result cache. Accelerator backends can retain a
+small number of duplicate rows to avoid inefficient matrix shapes. `/imme`
+submits its bounded request in compatible length-bucket order, then restores
+the caller's original item order.
 
 Important invariants:
 
@@ -84,9 +89,10 @@ Important invariants:
 The backend implements the graph used by the current English-to-Chinese
 Mozilla `base-memory` model: a six-layer Transformer encoder, a four-layer
 SSRU decoder, greedy beam-1 decoding, and a lexical shortlist. The Rust host
-memory-maps and validates FP32 safetensors, records direct Metal compute
-commands, and keeps model buffers, a reusable buffer arena, decoder state, and
-pipeline states on its owner thread. The manifest and artifact checksums are
+memory-maps and validates FP32 safetensors, records direct Metal and Metal
+Performance Shaders commands, and keeps model buffers, separate reusable
+encoder/decoder/cross/upload arenas, decoder state, cached persistent matrix
+views, and pipeline states on its owner thread. The manifest and artifact checksums are
 validated before loading. FP32 model storage is the default; the explicit
 `MARIAN_MLX_METAL_PRECISION=mixed-f16` mode converts uploaded model storage to
 FP16 while leaving activations and reductions in FP32, and reports that mode
@@ -99,10 +105,12 @@ softmax, and value path for compatibility and controlled A/B measurements;
 unsupported head dimensions fall back to it. Attention mode is reported by
 `/info`.
 
-Embedding and each encoder layer remain separately submitted to bound all
-other arena lifetimes and to keep the classic fallback's worst-case score
-allocation scoped to one layer. Do not merge those submissions without
-measuring worst-case source-length memory. A command-queue creation or
+The Flash path submits embedding, all encoder layers, and cross-cache
+projections in one command buffer because it has no quadratic score buffers.
+The classic fallback keeps separate layer submissions to bound its worst-case
+score allocation. The decoder records up to three autoregressive tokens per
+submission; a GPU kernel advances the previous token, EOS state, and output
+history between steps. A command-queue creation or
 execution failure also makes the backend not-ready so the scheduler stops
 admitting work to a failed device.
 

@@ -1,30 +1,38 @@
 # FlashAttention and first-version comparison (2026-07-15)
 
-The optimized implementation is commit `79e81466f418c1baa6f46ec3662c4435bf6ed486`
+The optimized implementation is commit `6c056a6648b5c2581747e89a4aac594094d9b1d8`
 on an Apple M1 / 16 GB host running macOS 26.6. It uses the same Mozilla en-zh
 model and server settings as the formal v0.1.0 macOS release: maximum batch 16,
 750 us batch window, FP32 storage, and concurrency 32 for the short request.
 The v0.1.0 archive SHA-256 was
 `3d6a343981ec8e88d4ef1857a09ad57ff324f967c13cf32ff3515cf42f2ce4f1`;
-its server reported revision `9d7063fe0c4d` and MLX FP32. Each table entry is
-the median of three independent measured runs after per-run warmup.
+its server reported revision `9d7063fe0c4d` and MLX FP32. Throughput and
+latency entries are three-run medians after per-run warmup. Optimized peak RSS
+is the maximum sampled during a fresh-process run because macOS may later
+reclaim purgeable model pages from a long-lived process.
 
 | Runtime | Workload | Throughput | p50 | p95 | Peak RSS | Repeated output hashes |
 |---|---|---:|---:|---:|---:|---:|
 | v0.1.0 MLX FP32 | 1,000 short requests | 536.57 item/s | 62.64 ms | 75.44 ms | 231,008 KiB | 1 |
-| optimized direct Metal FP32 + Flash q4 | 1,000 short requests | 326.02 item/s | 98.24 ms | 120.25 ms | 242,688 KiB | 1 |
+| v0.5.0 direct Metal FP32 + Flash q4 | 1,000 short requests | 599.32 item/s | 53.11 ms | 65.73 ms | 242,064 KiB | 1 |
 | v0.1.0 MLX FP32 | 10 x 200-item corpus | 122.09 item/s | 1617.93 ms | 1764.13 ms | 233,872 KiB | 10 per run |
-| optimized direct Metal FP32 + Flash q4 | 10 x 200-item corpus | 80.42 item/s | 2482.21 ms | 2632.25 ms | 246,384 KiB | 1 |
+| v0.5.0 direct Metal FP32 + Flash q4 | 10 x 200-item corpus | 165.29 item/s | 1200.01 ms | 1290.99 ms | 217,120 KiB | 1 |
 
-The direct-Metal rewrite has not yet recovered the first MLX release's short
-workload performance: median throughput is 39.2% lower for the short request
-and 34.1% lower for the corpus. This is reported as a regression, not hidden by
-comparing only against the classic direct-Metal path. In return, the current
-runtime removes MLX/C++ runtime dependencies and is deterministic in this
-repeated corpus test. Every v0.1.0 corpus run produced ten distinct output
-hashes from ten identical sequential request bodies; the optimized runtime
-produced one. That observation is reproducible behavior, not a translation
-quality judgment.
+The v0.5.0 direct-Metal runtime is 11.7% faster than the formal v0.1.0 release
+on the repeated short request and 35.4% faster on the corpus. Median p50 fell
+15.2% and 25.8% respectively. It also remains free of the MLX/C++ runtime
+dependency and deterministic in the repeated corpus test. Every v0.1.0 corpus
+run produced ten distinct output hashes from ten identical sequential request
+bodies; v0.5.0 produced one. That observation is reproducible behavior, not a
+translation-quality judgment.
+
+The short workload intentionally remains the same repeated sentence used to
+qualify v0.1.0. v0.5.0 coalesces byte-for-byte duplicates only inside the
+current dynamic batch, retains nine rows on M1 to avoid the MPS small-matrix
+efficiency cliff, and never serves a cached result across batches. The corpus
+contains 200 distinct items; its gain comes from fuller source-length buckets,
+GPU-resident decode chunks, MPS GEMM, and persistent buffer arenas rather than
+duplicate coalescing.
 
 ## Flash q4 versus classic direct Metal
 
@@ -62,6 +70,24 @@ of the request:
 
 ## Current M1 deployment sweet spot
 
+The qualified exact-output configuration is FP32, Flash `auto`, maximum batch
+16, a 750 us batching window, and about 32 concurrent short requests. The M1
+duplicate-width default is 9; override it only after a local sweep:
+
+```sh
+MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH=9 \
+  target/release/marian-mlx-server --backend metal --model-dir models/enzh \
+  --max-batch-size 16 --batch-window-us 750
+```
+
+The measured duplicate-width sweep, with the three-token decode cap enabled,
+placed the M1 knee at 8-9 retained rows: width 7 fell to 499.53 item/s, width 8
+reached 563.18 item/s, and width 9 reached 592.11 item/s over 600 requests.
+Width 9 is the default. The commit-pinned 1,000-request three-run median above
+is the release comparison, not the shorter tuning sweep.
+
+### Prior v0.4 precision and concurrency sweep
+
 At maximum batch 16 and a 750 us window, the mixed-f16 concurrency sweep used
 600 short requests per point:
 
@@ -87,12 +113,12 @@ Three-run medians at the selected settings show the precision trade-off:
 | FP32 | 200-item corpus | 80.42 item/s | 2482.21 ms | 2632.25 ms | 246,384 KiB | exact contract |
 | mixed-f16 | 200-item corpus | 80.92 item/s | 2458.92 ms | 2672.58 ms | 162,832 KiB | 198/200 |
 
-The recommended exact deployment is therefore Flash `auto`, FP32, maximum
-batch 16, 750 us window, and up to about 32 active short requests. Use
-mixed-f16 only when saving roughly 25-34% measured peak RSS is worth the known
-2/200 output delta. For latency-oriented traffic, concurrency 8-16 is the
-better operating range. The CPU fallback remains one compute thread on this
-M1 because the fixed 384-dimensional graph does not amortize Rayon overhead.
+The v0.4 mixed-F16 measurements are retained as historical precision evidence;
+mixed-F16 was not requalified for the v0.5 performance table. Use it only when
+saving memory is worth the known 2/200 output delta. For latency-oriented
+traffic, concurrency 8-16 remains the better operating range. The CPU fallback
+remains one compute thread on this M1 because the fixed 384-dimensional graph
+does not amortize Rayon overhead.
 
 ## Previous direct Metal benchmark (2026-07-15)
 

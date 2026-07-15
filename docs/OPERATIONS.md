@@ -31,6 +31,14 @@ Re-run `scripts/install-macos.sh` to update. The installer downloads and
 verifies the new runtime before stopping the current service, then checks
 `/readyz`; a failed cutover is rolled back.
 
+The qualified M1 throughput settings are maximum batch 16, a 750 us window,
+FP32, Flash `auto`, and the default duplicate width 9. The last value can be
+overridden before service start with
+`MARIAN_MLX_METAL_DUPLICATE_BATCH_WIDTH`; values must be positive. It controls
+how many identical rows are retained inside one dynamic batch and is not a
+result cache. Re-sweep it on a different Apple GPU instead of assuming the M1
+small-matrix knee applies unchanged.
+
 Uninstall the service while preserving the downloaded model:
 
 ```sh
