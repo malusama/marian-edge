@@ -7,6 +7,17 @@ Versioning after the first stable release.
 
 No changes yet.
 
+## [0.2.1] - 2026-07-15
+
+### Fixed
+
+- Preserved saved port and CORS settings when the macOS installer is re-run
+  without explicit overrides; an explicitly empty CORS override still clears
+  the saved origin.
+- Rebuilt the LaunchAgent from the target release template during rollback so
+  switching between the legacy MLX layout and the direct Metal layout does not
+  leave duplicate backend arguments.
+
 ## [0.2.0] - 2026-07-15
 
 ### Changed
@@ -65,7 +76,8 @@ No changes yet.
   `zh`.
 - Rootless launchd installer and CPU-only multi-architecture Docker path.
 
-[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/malusama/marian-mlx/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/malusama/marian-mlx/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/malusama/marian-mlx/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/malusama/marian-mlx/releases/tag/v0.1.0

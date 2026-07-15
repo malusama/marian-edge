@@ -43,13 +43,14 @@ For a reproducible pinned install:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.2.0 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.1/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.2.1 sh
 ```
 
 `v0.1.1` remains available as the last historical MLX/Bergamot release. Its
 runtime layout is not compatible with the direct Metal bundle contract used by
-`v0.2.0` and later.
+`v0.2.0` and later. Use `v0.2.1` or newer when rollback across those layouts is
+required.
 
 You can inspect the script before running it. First install needs about 750 MB
 of free space and takes longer because
@@ -85,7 +86,7 @@ Or without Compose:
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu-0.2.0
+  ghcr.io/malusama/marian-mlx:cpu-0.2.1
 ```
 
 The published image is multi-architecture AMD64/ARM64, non-root, and CPU-only.
@@ -121,8 +122,8 @@ available for a loopback-only personal deployment:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.2.0 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.1/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.2.1 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 For Docker, add `MARIAN_MLX_CORS_ORIGIN: "*"` under `environment` only if required.

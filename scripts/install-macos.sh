@@ -3,8 +3,20 @@ set -eu
 
 REPOSITORY=${MARIAN_MLX_REPOSITORY:-malusama/marian-mlx}
 REQUESTED_VERSION=${MARIAN_MLX_VERSION:-latest}
-PORT=${MARIAN_MLX_PORT:-3000}
-CORS_ORIGIN=${MARIAN_MLX_CORS_ORIGIN:-}
+if [ "${MARIAN_MLX_PORT+x}" = x ]; then
+  PORT=$MARIAN_MLX_PORT
+  PORT_WAS_EXPLICIT=true
+else
+  PORT=
+  PORT_WAS_EXPLICIT=false
+fi
+if [ "${MARIAN_MLX_CORS_ORIGIN+x}" = x ]; then
+  CORS_ORIGIN=$MARIAN_MLX_CORS_ORIGIN
+  CORS_ORIGIN_WAS_EXPLICIT=true
+else
+  CORS_ORIGIN=
+  CORS_ORIGIN_WAS_EXPLICIT=false
+fi
 BASE=${MARIAN_MLX_HOME:-"$HOME/.local/share/marian-mlx"}
 STATE=${MARIAN_MLX_STATE:-"$HOME/.local/state/marian-mlx"}
 BIN_DIR=${MARIAN_MLX_BIN_DIR:-"$HOME/.local/bin"}
@@ -31,12 +43,6 @@ MACOS_MAJOR=$(sw_vers -productVersion | awk -F. '{print $1}')
 if [ "$MACOS_MAJOR" -lt 14 ]; then
   fail "macOS 14 or newer is required"
 fi
-case "$PORT" in
-  ''|*[!0-9]*) fail "MARIAN_MLX_PORT must be a number" ;;
-esac
-if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-  fail "MARIAN_MLX_PORT must be between 1 and 65535"
-fi
 case "$BASE" in
   /*) ;;
   *) fail "MARIAN_MLX_HOME must be an absolute path" ;;
@@ -52,6 +58,31 @@ esac
 case "$BASE" in ""|/|"$HOME") fail "unsafe MARIAN_MLX_HOME: $BASE" ;; esac
 case "$STATE" in ""|/|"$HOME") fail "unsafe MARIAN_MLX_STATE: $STATE" ;; esac
 case "$BIN_DIR" in ""|/) fail "unsafe MARIAN_MLX_BIN_DIR: $BIN_DIR" ;; esac
+if [ "$PORT_WAS_EXPLICIT" = false ]; then
+  if [ -e "$PORT_CONFIG" ] || [ -L "$PORT_CONFIG" ]; then
+    if [ ! -f "$PORT_CONFIG" ] || [ -L "$PORT_CONFIG" ] ||
+       [ "$(awk 'END {print NR}' "$PORT_CONFIG")" -ne 1 ]; then
+      fail "the saved service port is invalid"
+    fi
+    PORT=$(sed -n '1p' "$PORT_CONFIG")
+  else
+    PORT=3000
+  fi
+fi
+case "$PORT" in
+  ''|*[!0-9]*) fail "MARIAN_MLX_PORT must be a number" ;;
+esac
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+  fail "MARIAN_MLX_PORT must be between 1 and 65535"
+fi
+if [ "$CORS_ORIGIN_WAS_EXPLICIT" = false ] &&
+   { [ -e "$CORS_CONFIG" ] || [ -L "$CORS_CONFIG" ]; }; then
+  if [ ! -f "$CORS_CONFIG" ] || [ -L "$CORS_CONFIG" ] ||
+     [ "$(awk 'END {print NR}' "$CORS_CONFIG")" -ne 1 ]; then
+    fail "the saved CORS origin is invalid"
+  fi
+  CORS_ORIGIN=$(sed -n '1p' "$CORS_CONFIG")
+fi
 if [ "$(printf '%s' "$CORS_ORIGIN" | wc -l | tr -d ' ')" -ne 0 ]; then
   fail "MARIAN_MLX_CORS_ORIGIN must be a single line"
 fi

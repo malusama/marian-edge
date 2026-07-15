@@ -309,32 +309,43 @@ release_is_valid() {
 
 configure_plist_for_release() {
   release=$1
+  template="$release/packaging/launchd/io.github.malusama.marian-mlx.plist"
   plist_new="$PLIST.marian-mlxctl.$$"
   rm -f "$plist_new"
-  cp -p "$PLIST" "$plist_new" || return 1
-
-  if release_uses_legacy_mlx "$release"; then
-    if ! plutil -replace ProgramArguments.2 -string mlx "$plist_new"; then
-      rm -f "$plist_new"
-      return 1
-    fi
-    # `plutil -remove` is intentionally allowed to miss on a direct Metal plist.
-    plutil -remove EnvironmentVariables "$plist_new" >/dev/null 2>&1 || true
-    if ! plutil -insert EnvironmentVariables -xml '<dict/>' "$plist_new" ||
-       ! plutil -insert EnvironmentVariables.MARIAN_MLX_METALLIB \
-         -string "$release/mlx.metallib" "$plist_new"; then
-      rm -f "$plist_new"
-      return 1
-    fi
-  else
-    if ! plutil -replace ProgramArguments.2 -string metal "$plist_new"; then
-      rm -f "$plist_new"
-      return 1
-    fi
-    plutil -remove EnvironmentVariables "$plist_new" >/dev/null 2>&1 || true
+  if [ ! -f "$template" ] || [ -L "$template" ]; then
+    return 1
   fi
 
-  if ! plutil -lint "$plist_new" >/dev/null || ! install -m 0644 "$plist_new" "$PLIST"; then
+  xml_escape() {
+    printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+  }
+  sed_replacement() {
+    printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+  }
+  program=$(sed_replacement "$(xml_escape "$BASE/current/marian-mlx-server")")
+  model_dir=$(sed_replacement "$(xml_escape "$BASE/models/en-zh")")
+  stdout=$(sed_replacement "$(xml_escape "$STATE/server.log")")
+  stderr=$(sed_replacement "$(xml_escape "$STATE/server.error.log")")
+  bind=$(sed_replacement "$(xml_escape "127.0.0.1:$PORT")")
+  metallib=$(sed_replacement "$(xml_escape "$release/mlx.metallib")")
+  if [ -n "$CORS_ORIGIN" ]; then
+    cors_xml="<string>--cors-origin</string><string>$(xml_escape "$CORS_ORIGIN")</string>"
+  else
+    cors_xml=
+  fi
+  cors_xml=$(sed_replacement "$cors_xml")
+
+  if ! sed \
+    -e "s|@PROGRAM@|$program|g" \
+    -e "s|@MODEL_DIR@|$model_dir|g" \
+    -e "s|@STDOUT@|$stdout|g" \
+    -e "s|@STDERR@|$stderr|g" \
+    -e "s|@BIND@|$bind|g" \
+    -e "s|@METALLIB@|$metallib|g" \
+    -e "s|@CORS_ARGUMENT@|$cors_xml|g" \
+    "$template" > "$plist_new" ||
+     ! plutil -lint "$plist_new" >/dev/null ||
+     ! install -m 0644 "$plist_new" "$PLIST"; then
     rm -f "$plist_new"
     return 1
   fi

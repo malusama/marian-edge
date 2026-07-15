@@ -34,15 +34,15 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.2.0 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.1/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.2.1 sh
 ```
 
 安装器不需要 root，会校验 Release 和所有模型文件；模型由用户机器直接从
 Mozilla 存储下载并在本机转换，然后安装用户级 LaunchAgent，默认监听
 `127.0.0.1:3000`。首次安装需要约 750 MB 可用空间。`v0.1.1` 仍作为最后一个
 历史 MLX/Bergamot 版本保留，但其 runtime 布局不兼容 `v0.2.0` 的 direct Metal
-bundle 契约。
+bundle 契约；需要在两种布局间回滚时请使用 `v0.2.1` 或更高版本。
 
 ```sh
 ~/.local/bin/marian-mlxctl status
@@ -74,7 +74,7 @@ curl -fsS http://127.0.0.1:3000/info
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu-0.2.0
+  ghcr.io/malusama/marian-mlx:cpu-0.2.1
 ```
 
 发布镜像是 AMD64/ARM64 多架构、非 root、CPU-only。镜像不内置模型；第一次
@@ -105,8 +105,8 @@ CORS 错误，可在只绑定本机的前提下重新运行固定版本安装器
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.0/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.2.0 MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.1/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.2.1 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 Docker 可在 `compose.yaml` 的 `environment` 中增加
