@@ -56,6 +56,32 @@ Metal trace or equivalent device evidence.
   must never be selected as an implicit fallback.
 - Preserve bounded queues and explicit overload responses.
 
+## Release checklist
+
+Release tags drive both the macOS archive and the multi-architecture CPU image.
+Before creating a tag:
+
+1. Update the workspace and repository-owned dependency versions in
+   `Cargo.toml`, regenerate `Cargo.lock`, and update the Dockerfile's default
+   version. The `vX.Y.Z` tag must exactly match the workspace version.
+2. Move the relevant `CHANGELOG.md` entries out of `Unreleased`, add the release
+   date, and update its comparison links.
+3. Run `make check`, `scripts/package-macos.sh`, and the ignored model-backed
+   golden tests listed above. Verify the packaged archive and its checksums,
+   not only the build tree.
+4. Let CI pass on the release commit before pushing the tag. Confirm the release
+   workflow publishes `marian-mlx-macos-arm64.tar.gz`, `SHA256SUMS`, and
+   `install-macos.sh`, and that their provenance attestations are present.
+5. Confirm `ghcr.io/malusama/marian-mlx:cpu-X.Y.Z` and the floating `:cpu` tag
+   both contain Linux AMD64 and ARM64 manifests built from the tagged commit.
+6. Exercise a fresh pinned macOS install, `/readyz`, `/info`, update, rollback,
+   and uninstall. Confirm the backend, revision, device, precision, and model
+   reported by `/info` match the intended release.
+
+Only after these checks should the README's unreleased-runtime warning be
+removed and its installer/container examples be switched back to published
+artifacts.
+
 ## Licensing
 
 Contributions are accepted under the repository's MIT license. New external

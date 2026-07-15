@@ -30,9 +30,19 @@ curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/malusama/marian-mlx/main/scripts/install-macos.sh | sh
 ```
 
+固定版本安装：
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.2.0 sh
+```
+
 安装器不需要 root，会校验 Release 和所有模型文件；模型由用户机器直接从
 Mozilla 存储下载并在本机转换，然后安装用户级 LaunchAgent，默认监听
-`127.0.0.1:3000`。首次安装需要约 750 MB 可用空间。
+`127.0.0.1:3000`。首次安装需要约 750 MB 可用空间。`v0.1.1` 仍作为最后一个
+历史 MLX/Bergamot 版本保留，但其 runtime 布局不兼容 `v0.2.0` 的 direct Metal
+bundle 契约。
 
 ```sh
 ~/.local/bin/marian-mlxctl status
@@ -49,7 +59,10 @@ Mozilla 存储下载并在本机转换，然后安装用户级 LaunchAgent，默
 
 ## Docker CPU 一键启动
 
+升级时先显式拉取，避免复用本地旧的 `:cpu` 镜像：
+
 ```sh
+docker compose pull
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:3000/info
@@ -61,19 +74,19 @@ curl -fsS http://127.0.0.1:3000/info
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu
+  ghcr.io/malusama/marian-mlx:cpu-0.2.0
 ```
 
-镜像是 AMD64/ARM64 多架构、非 root、CPU-only。镜像不内置模型；第一次启动
-时会从 Mozilla 存储直接下载固定的英译中模型，校验压缩前后 SHA-256 后写入
-named volume，后续启动直接复用。
+发布镜像是 AMD64/ARM64 多架构、非 root、CPU-only。镜像不内置模型；第一次
+启动时会从 Mozilla 存储直接下载固定的英译中模型，校验压缩前后 SHA-256 后
+写入 named volume，后续启动直接复用。
 
 CPU 模型由单一 owner 持有，因此增加计算线程不会加载额外模型副本。并发 HTTP
 请求仍会先合并成批次再推理。`MARIAN_MLX_CPU_THREADS` 支持 1、2 或 4，同时
 控制 FP32 矩阵乘法以及 Q8 的 rten/精确 AVX2 row-parallel kernel：
 
 ```sh
-MARIAN_MLX_CPU_THREADS=2 docker compose up -d
+MARIAN_MLX_CPU_THREADS=2 docker compose up -d --force-recreate
 ```
 
 无论设置几个计算线程，模型都仍只有一个 owner。增加内部计算并行度前应在
@@ -88,12 +101,12 @@ MARIAN_MLX_CPU_THREADS=2 docker compose up -d
 5. 源语言选择英语，目标语言选择简体中文。
 
 服务默认不开放 CORS。扩展具备 localhost 权限时通常不需要；如果扩展明确报告
-CORS 错误，可在只绑定本机的前提下重新安装并显式启用：
+CORS 错误，可在只绑定本机的前提下重新运行固定版本安装器：
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/main/scripts/install-macos.sh | \
-  MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.2.0 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 Docker 可在 `compose.yaml` 的 `environment` 中增加

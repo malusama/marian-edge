@@ -13,7 +13,7 @@ RUN MARIAN_MLX_BUILD_GIT_SHA="$VCS_REF" \
 
 FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS runtime
 
-ARG VERSION=0.1.1
+ARG VERSION=0.2.0
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="Marian MLX CPU" \
       org.opencontainers.image.description="Local Marian translation service using the pure-Rust Q8 CPU backend" \

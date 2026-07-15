@@ -5,6 +5,10 @@ Versioning after the first stable release.
 
 ## [Unreleased]
 
+No changes yet.
+
+## [0.2.0] - 2026-07-15
+
 ### Changed
 
 - Replaced the native MLX/CXX inference bridge with a Rust host using
@@ -30,6 +34,10 @@ Versioning after the first stable release.
   differential corpus: 164/200 outputs exactly matched the retired CPU
   reference. Tested 80-sentence and newline cases matched its long-text
   baseline; general bit-for-bit equivalence is not claimed.
+- Added runtime-gated Arm SDOT and exact full-range AVX2 kernels, native AMD64
+  and ARM64 container smoke tests, and a measured optimization roadmap.
+- Documented the release boundary between source, runtime artifacts, and model
+  downloads, with a repeatable release checklist.
 
 ### Removed
 
@@ -57,6 +65,7 @@ Versioning after the first stable release.
   `zh`.
 - Rootless launchd installer and CPU-only multi-architecture Docker path.
 
-[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/malusama/marian-mlx/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/malusama/marian-mlx/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/malusama/marian-mlx/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/malusama/marian-mlx/releases/tag/v0.1.0

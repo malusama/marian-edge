@@ -43,6 +43,7 @@ logs too.
 ## Docker CPU service
 
 ```sh
+docker compose pull
 docker compose up -d
 docker compose ps
 docker compose logs -f
@@ -69,7 +70,8 @@ representative traffic, and compare throughput, tail latency, CPU utilization,
 and peak RSS:
 
 ```sh
-MARIAN_MLX_CPU_THREADS=2 docker compose up -d --force-recreate
+MARIAN_MLX_CPU_THREADS=2 \
+  docker compose up -d --force-recreate
 docker stats
 ```
 

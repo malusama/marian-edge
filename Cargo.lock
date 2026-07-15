@@ -530,7 +530,7 @@ checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "marian-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "marian-cpu"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "marian-core",
  "marian-model",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "marian-mlx"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "marian-core",
  "marian-cpu",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "marian-model"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "marian-core",
  "serde",
@@ -581,7 +581,7 @@ dependencies = [
 
 [[package]]
 name = "marian-server"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "marian-tokenizer"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "sentencepiece-rust",
  "thiserror",

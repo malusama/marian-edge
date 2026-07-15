@@ -31,25 +31,25 @@ installer when Apple GPU inference is the goal.
 
 ## Native Apple GPU: one command
 
-The installer runs as the current user, verifies downloads, and installs a
-LaunchAgent on `127.0.0.1:3000`. Model conversion also runs locally.
+The installer runs as the current user, verifies downloads, installs a
+LaunchAgent on `127.0.0.1:3000`, and converts the model locally.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://raw.githubusercontent.com/malusama/marian-mlx/main/scripts/install-macos.sh | sh
 ```
 
-For a pinned release:
+For a reproducible pinned install:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/v0.1.1/scripts/install-macos.sh | \
-  MARIAN_MLX_VERSION=v0.1.1 sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.2.0 sh
 ```
 
-`v0.1.1` is retained as a historical, reproducible release, but it predates
-the direct Metal migration and still uses MLX. Pin the first newer tag that
-contains this migration when one is published.
+`v0.1.1` remains available as the last historical MLX/Bergamot release. Its
+runtime layout is not compatible with the direct Metal bundle contract used by
+`v0.2.0` and later.
 
 You can inspect the script before running it. First install needs about 750 MB
 of free space and takes longer because
@@ -70,7 +70,10 @@ port owned by another process and rolls back if `/readyz` fails.
 
 ## Docker CPU: one command
 
+Pull explicitly when upgrading so an older local `:cpu` image is not reused:
+
 ```sh
+docker compose pull
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:3000/info
@@ -82,13 +85,13 @@ Or without Compose:
 docker run -d --name marian-mlx --restart unless-stopped \
   -p 127.0.0.1:3000:3000 \
   -v marian-mlx-models:/models \
-  ghcr.io/malusama/marian-mlx:cpu
+  ghcr.io/malusama/marian-mlx:cpu-0.2.0
 ```
 
-The image is multi-architecture and runs as a non-root user. It does not embed
-model bytes: on first start it downloads the pinned `en -> zh` release directly
-from Mozilla storage into the named volume and verifies compressed and
-uncompressed SHA-256 values. Later starts reuse the volume.
+The published image is multi-architecture AMD64/ARM64, non-root, and CPU-only.
+It does not embed model bytes: on first start it downloads the pinned `en ->
+zh` release directly from Mozilla storage into the named volume and verifies
+compressed and uncompressed SHA-256 values. Later starts reuse the volume.
 
 The CPU model has one owner, so changing the compute-thread count does not load
 extra model replicas. Concurrent HTTP requests are still micro-batched before
@@ -96,7 +99,7 @@ inference. `MARIAN_MLX_CPU_THREADS` accepts 1, 2, or 4 and controls both FP32
 matrix multiplication and the Q8 rten/exact-AVX2 row-parallel kernels:
 
 ```sh
-MARIAN_MLX_CPU_THREADS=2 docker compose up -d
+MARIAN_MLX_CPU_THREADS=2 docker compose up -d --force-recreate
 ```
 
 The model remains single-owner at every setting. Measure the actual host and
@@ -113,13 +116,13 @@ traffic before increasing its internal compute parallelism.
 
 The service has CORS disabled by default. Browser extensions with localhost
 permission normally do not need it. If the extension reports a CORS error,
-re-run the native installer explicitly with a trusted extension origin. A
-wildcard is available for a loopback-only personal deployment:
+re-run the pinned installer with a trusted extension origin. A wildcard is
+available for a loopback-only personal deployment:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-mlx/main/scripts/install-macos.sh | \
-  MARIAN_MLX_CORS_ORIGIN='*' sh
+  https://raw.githubusercontent.com/malusama/marian-mlx/v0.2.0/scripts/install-macos.sh | \
+  MARIAN_MLX_VERSION=v0.2.0 MARIAN_MLX_CORS_ORIGIN='*' sh
 ```
 
 For Docker, add `MARIAN_MLX_CORS_ORIGIN: "*"` under `environment` only if required.
