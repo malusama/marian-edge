@@ -3,7 +3,9 @@
   "private": true,
   "scripts": {
     "build:wasm": "RUSTFLAGS='-C target-feature=+simd128' cargo build -p marian-worker-wasm --target wasm32-unknown-unknown --release && mkdir -p dist && cp ../target/wasm32-unknown-unknown/release/marian_worker_wasm.wasm dist/",
-    "deploy": "npm run build:wasm && npx wrangler deploy --config worker/wrangler.jsonc"
+    "pack:model": "node scripts/pack-model.mjs",
+    "smoke:packed": "node scripts/smoke.mjs --packed",
+    "deploy": "npm run build:wasm && npx wrangler deploy --config wrangler.jsonc"
   },
   "devDependencies": {
     "wrangler": "^4.44.0"

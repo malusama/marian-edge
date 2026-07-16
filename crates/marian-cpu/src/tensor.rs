@@ -28,6 +28,10 @@ impl Matrix {
     pub(crate) fn rows(&self) -> usize {
         self.rows
     }
+
+    pub(crate) fn cols(&self) -> usize {
+        self.cols
+    }
 }
 
 pub(crate) fn matmul(

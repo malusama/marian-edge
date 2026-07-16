@@ -1,7 +1,7 @@
 use std::{cell::RefCell, slice};
 
 use marian_core::{TranslationBackend, TranslationInput};
-use marian_cpu::Q8CpuBackend;
+use marian_cpu::{ModelManifest, Q8CpuBackend, Q8CpuEngine};
 use serde::Serialize;
 
 thread_local! {
@@ -25,6 +25,14 @@ pub extern "C" fn alloc(length: usize) -> *mut u8 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn alloc_u32(length: usize) -> *mut u32 {
+    let mut words = Vec::<u32>::with_capacity(length);
+    let pointer = words.as_mut_ptr();
+    std::mem::forget(words);
+    pointer
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dealloc(pointer: *mut u8, length: usize) {
     if !pointer.is_null() {
         // SAFETY: The JS host only returns allocations obtained from `alloc`.
@@ -35,6 +43,17 @@ pub unsafe extern "C" fn dealloc(pointer: *mut u8, length: usize) {
 unsafe fn take_bytes(pointer: *mut u8, length: usize) -> Vec<u8> {
     // SAFETY: Each pointer is produced by `alloc(length)`, filled exactly once,
     // and transferred to this function exactly once.
+    unsafe { Vec::from_raw_parts(pointer, length, length) }
+}
+
+unsafe fn take_i8(pointer: *mut u8, length: usize) -> Vec<i8> {
+    // SAFETY: u8 and i8 have identical size/alignment and the allocation came
+    // from `alloc(length)` with length used as its final capacity.
+    unsafe { Vec::from_raw_parts(pointer.cast::<i8>(), length, length) }
+}
+
+unsafe fn take_u32(pointer: *mut u32, length: usize) -> Vec<u32> {
+    // SAFETY: The pointer came from `alloc_u32(length)` and is transferred once.
     unsafe { Vec::from_raw_parts(pointer, length, length) }
 }
 
@@ -66,6 +85,112 @@ pub unsafe extern "C" fn init(
         }
         Err(error) => {
             set_error(error.to_string());
+            1
+        }
+    }
+}
+
+/// Initialize from a Worker-specific artifact whose dense matrices were
+/// already packed by the wasm32 SIMD kernel.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_packed(
+    manifest_pointer: *mut u8,
+    manifest_length: usize,
+    weights_pointer: *mut u8,
+    weights_length: usize,
+    source_pointer: *mut u8,
+    source_length: usize,
+    target_pointer: *mut u8,
+    target_length: usize,
+    shortlist_pointer: *mut u8,
+    shortlist_length: usize,
+) -> i32 {
+    let result = Q8CpuBackend::from_preverified_worker_packed_bytes(
+        unsafe { take_bytes(manifest_pointer, manifest_length) },
+        unsafe { take_bytes(weights_pointer, weights_length) },
+        unsafe { take_bytes(source_pointer, source_length) },
+        unsafe { take_bytes(target_pointer, target_length) },
+        (shortlist_length != 0).then(|| unsafe { take_bytes(shortlist_pointer, shortlist_length) }),
+    );
+    match result {
+        Ok(backend) => {
+            BACKEND.with(|slot| *slot.borrow_mut() = Some(backend));
+            set_result(b"{\"ready\":true,\"packed\":true}".to_vec());
+            0
+        }
+        Err(error) => {
+            set_error(error.to_string());
+            1
+        }
+    }
+}
+
+/// Zero-copy packed initializer. The bundle is split by the JS host and every
+/// large section enters Wasm in its final owned representation.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn init_packed_parts(
+    manifest_pointer: *mut u8,
+    manifest_length: usize,
+    metadata_pointer: *mut u8,
+    metadata_length: usize,
+    dense_pointer: *mut u32,
+    dense_words: usize,
+    encoder_embedding_pointer: *mut u8,
+    encoder_embedding_length: usize,
+    decoder_embedding_pointer: *mut u8,
+    decoder_embedding_length: usize,
+    source_pointer: *mut u8,
+    source_length: usize,
+    target_pointer: *mut u8,
+    target_length: usize,
+    shortlist_pointer: *mut u8,
+    shortlist_length: usize,
+) -> i32 {
+    let result = Q8CpuBackend::from_preverified_worker_packed_parts(
+        unsafe { take_bytes(manifest_pointer, manifest_length) },
+        unsafe { take_bytes(metadata_pointer, metadata_length) },
+        unsafe { take_u32(dense_pointer, dense_words) },
+        unsafe { take_i8(encoder_embedding_pointer, encoder_embedding_length) },
+        unsafe { take_i8(decoder_embedding_pointer, decoder_embedding_length) },
+        unsafe { take_bytes(source_pointer, source_length) },
+        unsafe { take_bytes(target_pointer, target_length) },
+        (shortlist_length != 0).then(|| unsafe { take_bytes(shortlist_pointer, shortlist_length) }),
+    );
+    match result {
+        Ok(backend) => {
+            BACKEND.with(|slot| *slot.borrow_mut() = Some(backend));
+            set_result(b"{\"ready\":true,\"packed\":true,\"zero_copy\":true}".to_vec());
+            0
+        }
+        Err(error) => {
+            set_error(error.to_string());
+            1
+        }
+    }
+}
+
+/// Offline converter entry point. It must be invoked from this SIMD-enabled
+/// Wasm build so the artifact is tied to the exact Worker GEMM kernel.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pack_model(
+    manifest_pointer: *mut u8,
+    manifest_length: usize,
+    weights_pointer: *mut u8,
+    weights_length: usize,
+) -> i32 {
+    let manifest_bytes = unsafe { take_bytes(manifest_pointer, manifest_length) };
+    let weights = unsafe { take_bytes(weights_pointer, weights_length) };
+    let result = ModelManifest::from_bytes(&manifest_bytes)
+        .map_err(|error| error.to_string())
+        .and_then(|manifest| Q8CpuEngine::pack_worker_artifact(&weights, &manifest.architecture));
+    match result {
+        Ok(artifact) => {
+            set_result(artifact);
+            0
+        }
+        Err(error) => {
+            set_error(error);
             1
         }
     }

@@ -609,6 +609,124 @@ impl Q8CpuBackend {
         )
     }
 
+    /// Loads a caller-verified Worker packed artifact. Unlike the canonical
+    /// Q8 path this restores SIMD-packed matrices directly and performs no
+    /// dense-weight repacking during cold start.
+    pub fn from_preverified_worker_packed_bytes(
+        manifest_bytes: Vec<u8>,
+        packed_weights_bytes: Vec<u8>,
+        source_vocab_bytes: Vec<u8>,
+        target_vocab_bytes: Vec<u8>,
+        shortlist_bytes: Option<Vec<u8>>,
+    ) -> Result<Self, BackendError> {
+        let manifest = ModelManifest::from_bytes(&manifest_bytes)?;
+        drop(manifest_bytes);
+        let source =
+            marian_tokenizer::Tokenizer::from_bytes(&source_vocab_bytes).map_err(|error| {
+                BackendError::Model(format!("failed to load source tokenizer: {error}"))
+            })?;
+        drop(source_vocab_bytes);
+        let target =
+            marian_tokenizer::Tokenizer::from_bytes(&target_vocab_bytes).map_err(|error| {
+                BackendError::Model(format!("failed to load target tokenizer: {error}"))
+            })?;
+        drop(target_vocab_bytes);
+        if manifest.precision != "q8" {
+            return Err(BackendError::Model(format!(
+                "Q8 CPU backend requires precision q8, got {}",
+                manifest.precision
+            )));
+        }
+        if source.vocabulary_size() != manifest.architecture.source_vocab_size
+            || target.vocabulary_size() != manifest.architecture.target_vocab_size
+        {
+            return Err(BackendError::Model(format!(
+                "tokenizer vocabulary sizes {} / {} do not match model {} / {}",
+                source.vocabulary_size(),
+                target.vocabulary_size(),
+                manifest.architecture.source_vocab_size,
+                manifest.architecture.target_vocab_size
+            )));
+        }
+        let engine = Q8CpuEngine::from_worker_packed_bytes(
+            &packed_weights_bytes,
+            shortlist_bytes.as_deref(),
+            &manifest.architecture,
+        )
+        .map_err(BackendError::Model)?;
+        drop(packed_weights_bytes);
+        drop(shortlist_bytes);
+        Ok(Self {
+            engine,
+            source: Box::new(source),
+            target: Box::new(target),
+            source_lang: manifest.source_lang,
+            target_lang: manifest.target_lang,
+            model_id: manifest.model_id,
+            eos_id: manifest.architecture.eos_id,
+        })
+    }
+
+    /// Zero-copy variant for the four ownership sections in a Worker packed
+    /// bundle. The Wasm ABI guarantees alignment for `dense_words`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_preverified_worker_packed_parts(
+        manifest_bytes: Vec<u8>,
+        metadata_bytes: Vec<u8>,
+        dense_words: Vec<u32>,
+        encoder_embedding: Vec<i8>,
+        decoder_embedding: Vec<i8>,
+        source_vocab_bytes: Vec<u8>,
+        target_vocab_bytes: Vec<u8>,
+        shortlist_bytes: Option<Vec<u8>>,
+    ) -> Result<Self, BackendError> {
+        let manifest = ModelManifest::from_bytes(&manifest_bytes)?;
+        drop(manifest_bytes);
+        let source =
+            marian_tokenizer::Tokenizer::from_bytes(&source_vocab_bytes).map_err(|error| {
+                BackendError::Model(format!("failed to load source tokenizer: {error}"))
+            })?;
+        drop(source_vocab_bytes);
+        let target =
+            marian_tokenizer::Tokenizer::from_bytes(&target_vocab_bytes).map_err(|error| {
+                BackendError::Model(format!("failed to load target tokenizer: {error}"))
+            })?;
+        drop(target_vocab_bytes);
+        if manifest.precision != "q8" {
+            return Err(BackendError::Model(format!(
+                "Q8 CPU backend requires precision q8, got {}",
+                manifest.precision
+            )));
+        }
+        if source.vocabulary_size() != manifest.architecture.source_vocab_size
+            || target.vocabulary_size() != manifest.architecture.target_vocab_size
+        {
+            return Err(BackendError::Model(
+                "tokenizer vocabulary sizes do not match packed model manifest".into(),
+            ));
+        }
+        let engine = Q8CpuEngine::from_worker_packed_parts(
+            &metadata_bytes,
+            dense_words,
+            encoder_embedding,
+            decoder_embedding,
+            shortlist_bytes.as_deref(),
+            &manifest.architecture,
+        )
+        .map_err(BackendError::Model)?;
+        drop(metadata_bytes);
+        drop(shortlist_bytes);
+        Ok(Self {
+            engine,
+            source: Box::new(source),
+            target: Box::new(target),
+            source_lang: manifest.source_lang,
+            target_lang: manifest.target_lang,
+            model_id: manifest.model_id,
+            eos_id: manifest.architecture.eos_id,
+        })
+    }
+
     fn from_preverified_parts(
         manifest: ModelManifest,
         weights_bytes: Vec<u8>,

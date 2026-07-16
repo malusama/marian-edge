@@ -18,6 +18,8 @@ use crate::{
     },
 };
 
+mod worker_packed;
+
 const EMBEDDING_SCALE: f32 = 19.595_919;
 
 struct Q8Embedding {
@@ -205,6 +207,20 @@ impl Q8CpuEngine {
         let packed_weight_build_ms = packing_started.elapsed().as_secs_f64() * 1_000.0;
         #[cfg(target_arch = "wasm32")]
         let packed_weight_build_ms = 0.0;
+        Self::from_loaded_model(
+            model,
+            shortlist_source,
+            architecture,
+            packed_weight_build_ms,
+        )
+    }
+
+    fn from_loaded_model(
+        model: Q8ModelWeights,
+        shortlist_source: Option<ShortlistSource<'_>>,
+        architecture: &Architecture,
+        packed_weight_build_ms: f64,
+    ) -> Result<Self, String> {
         let shortlist = match shortlist_source {
             Some(ShortlistSource::Path(path)) => LexicalShortlist::load(
                 Some(path),
@@ -236,6 +252,62 @@ impl Q8CpuEngine {
             buffer_pool: RefCell::new(Vec::new()),
             packed_weight_build_ms,
         })
+    }
+
+    /// Convert a canonical Marian Q8 model into the Worker-only packed ABI.
+    /// The call deliberately fails unless it runs with the Wasm SIMD kernel.
+    pub fn pack_worker_artifact(
+        weights: &[u8],
+        architecture: &Architecture,
+    ) -> Result<Vec<u8>, String> {
+        architecture.validate_supported()?;
+        let binary = MarianBinaryModel::parse(weights).map_err(q8_string)?;
+        validate_tensor_schema(&binary, architecture)?;
+        let model = Q8ModelWeights::load_owned(binary, architecture)?;
+        worker_packed::encode(&model, architecture)
+    }
+
+    /// Load the Worker-only packed ABI without parsing canonical Marian
+    /// tensors or repacking any dense matrix.
+    pub fn from_worker_packed_bytes(
+        packed: &[u8],
+        shortlist: Option<&[u8]>,
+        architecture: &Architecture,
+    ) -> Result<Self, String> {
+        architecture.validate_supported()?;
+        let model = worker_packed::decode(packed, architecture)?;
+        Self::from_loaded_model(
+            model,
+            shortlist.map(ShortlistSource::Bytes),
+            architecture,
+            0.0,
+        )
+    }
+
+    /// Zero-copy Worker loader. Dense words and embedding byte buffers are
+    /// transferred into Wasm with their final element alignment and ownership.
+    pub fn from_worker_packed_parts(
+        metadata: &[u8],
+        dense: Vec<u32>,
+        encoder_embedding: Vec<i8>,
+        decoder_embedding: Vec<i8>,
+        shortlist: Option<&[u8]>,
+        architecture: &Architecture,
+    ) -> Result<Self, String> {
+        architecture.validate_supported()?;
+        let model = worker_packed::decode_parts(
+            metadata,
+            dense,
+            encoder_embedding,
+            decoder_embedding,
+            architecture,
+        )?;
+        Self::from_loaded_model(
+            model,
+            shortlist.map(ShortlistSource::Bytes),
+            architecture,
+            0.0,
+        )
     }
 
     pub fn memory_report(&self) -> Q8MemoryReport {
