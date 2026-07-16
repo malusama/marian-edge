@@ -520,8 +520,15 @@ fn worker_loop<B: TranslationBackend>(
             Ok(outputs) if outputs.len() == unique_inputs.len() => {
                 for (job, output_index) in jobs.into_iter().zip(output_indices) {
                     let output = outputs[output_index].clone();
-                    if job.reply.send(Ok(output)).is_ok() {
+                    if !job.reply.is_closed() {
+                        // Publish completion before waking the receiver. This
+                        // guarantees that a caller which observes the reply
+                        // also observes its completed count. Roll it back if
+                        // the receiver closes in the narrow window before send.
                         stats.completed.fetch_add(1, Ordering::Relaxed);
+                        if job.reply.send(Ok(output)).is_err() {
+                            stats.completed.fetch_sub(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }
