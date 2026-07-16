@@ -45,6 +45,12 @@ pub extern "C" fn alloc_u32(length: usize) -> *mut u32 {
 }
 
 #[unsafe(no_mangle)]
+/// Release an input allocation that has not been transferred to an initializer.
+///
+/// # Safety
+///
+/// `pointer` must be null or come from [`alloc`] with exactly `length` bytes of
+/// capacity. The allocation must not have been released or transferred before.
 pub unsafe extern "C" fn dealloc(pointer: *mut u8, length: usize) {
     if !pointer.is_null() {
         // SAFETY: The JS host only returns allocations obtained from `alloc`.
@@ -70,6 +76,13 @@ unsafe fn take_u32(pointer: *mut u32, length: usize) -> Vec<u32> {
 }
 
 #[unsafe(no_mangle)]
+/// Initialize the canonical Q8 backend from host-owned Wasm allocations.
+///
+/// # Safety
+///
+/// Every non-null pointer must come from [`alloc`] with the corresponding byte
+/// length. Each allocation must be initialized, disjoint, and transferred
+/// exactly once; this function takes ownership of all supplied allocations.
 pub unsafe extern "C" fn init(
     manifest_pointer: *mut u8,
     manifest_length: usize,
@@ -104,6 +117,12 @@ pub unsafe extern "C" fn init(
 
 /// Initialize from a Worker-specific artifact whose dense matrices were
 /// already packed by the wasm32 SIMD kernel.
+///
+/// # Safety
+///
+/// Every non-null pointer must come from [`alloc`] with the corresponding byte
+/// length. Each allocation must be initialized, disjoint, and transferred
+/// exactly once; this function takes ownership of all supplied allocations.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn init_packed(
     manifest_pointer: *mut u8,
@@ -139,6 +158,13 @@ pub unsafe extern "C" fn init_packed(
 
 /// Zero-copy packed initializer. The bundle is split by the JS host and every
 /// large section enters Wasm in its final owned representation.
+///
+/// # Safety
+///
+/// `dense_pointer` must come from [`alloc_u32`] with `dense_words` capacity.
+/// Every other non-null pointer must come from [`alloc`] with its corresponding
+/// byte length. All allocations must be initialized, disjoint, and transferred
+/// exactly once; this function takes ownership of them.
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn init_packed_parts(
@@ -184,6 +210,12 @@ pub unsafe extern "C" fn init_packed_parts(
 
 /// Offline converter entry point. It must be invoked from this SIMD-enabled
 /// Wasm build so the artifact is tied to the exact Worker GEMM kernel.
+///
+/// # Safety
+///
+/// Both pointers must come from [`alloc`] with the corresponding byte lengths.
+/// The allocations must be initialized, disjoint, and transferred exactly
+/// once; this function takes ownership of them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pack_model(
     manifest_pointer: *mut u8,
@@ -209,6 +241,13 @@ pub unsafe extern "C" fn pack_model(
 }
 
 #[unsafe(no_mangle)]
+/// Translate one UTF-8 input borrowed from the host.
+///
+/// # Safety
+///
+/// `pointer` must be valid and readable for `length` bytes for the duration of
+/// this call. The host retains ownership and must not mutate the allocation
+/// concurrently.
 pub unsafe extern "C" fn translate(
     pointer: *const u8,
     length: usize,
@@ -251,6 +290,12 @@ pub unsafe extern "C" fn translate(
 
 /// Translate a JSON string array as one real model batch. The JS host keeps
 /// the input allocation and releases it after this call returns.
+///
+/// # Safety
+///
+/// `pointer` must be valid and readable for `length` bytes for the duration of
+/// this call. The host retains ownership and must not mutate the allocation
+/// concurrently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn translate_batch_json(
     pointer: *const u8,

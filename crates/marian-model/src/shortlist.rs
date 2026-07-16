@@ -86,10 +86,10 @@ impl LexicalShortlist {
         if bytes.len() < 48 {
             return Err("truncated lexical shortlist header".into());
         }
-        let magic = read_u64(&bytes, 0)?;
-        let first_num = to_usize(read_u64(&bytes, 16)?, "firstNum")?;
-        let offset_count = to_usize(read_u64(&bytes, 32)?, "offset count")?;
-        let target_count = to_usize(read_u64(&bytes, 40)?, "target count")?;
+        let magic = read_u64(bytes, 0)?;
+        let first_num = to_usize(read_u64(bytes, 16)?, "firstNum")?;
+        let offset_count = to_usize(read_u64(bytes, 32)?, "offset count")?;
+        let target_count = to_usize(read_u64(bytes, 40)?, "target count")?;
         if magic != MAGIC
             || offset_count != offset_count_expected
             || first_num > target_vocab
@@ -115,7 +115,7 @@ impl LexicalShortlist {
         let mut cursor = 48;
         let mut offsets = Vec::with_capacity(offset_count);
         for _ in 0..offset_count {
-            offsets.push(to_usize(read_u64(&bytes, cursor)?, "offset")?);
+            offsets.push(to_usize(read_u64(bytes, cursor)?, "offset")?);
             cursor += 8;
         }
         if offsets.first() != Some(&0)
@@ -129,7 +129,7 @@ impl LexicalShortlist {
 
         let mut targets = Vec::with_capacity(target_count);
         for _ in 0..target_count {
-            let target = read_u32(&bytes, cursor)?;
+            let target = read_u32(bytes, cursor)?;
             if target as usize >= target_vocab {
                 return Err(format!(
                     "lexical shortlist target {target} exceeds vocabulary {target_vocab}"
