@@ -186,8 +186,8 @@ pub struct WasmInt8Kernel {
 }
 
 impl WasmInt8Kernel {
-    const MR: usize = 8;
-    const NR: usize = 8;
+    const MR: usize = 4;
+    const NR: usize = 16;
 }
 
 unsafe impl Kernel<u8, i8, i32> for WasmInt8Kernel {
@@ -196,6 +196,10 @@ unsafe impl Kernel<u8, i8, i32> for WasmInt8Kernel {
     }
 
     fn name(&self) -> &'static str {
+        #[cfg(target_feature = "relaxed-simd")]
+        return "wasm-u8i8i32-relaxed";
+
+        #[cfg(not(target_feature = "relaxed-simd"))]
         "wasm-u8i8i32"
     }
 
@@ -351,6 +355,38 @@ unsafe impl Int8DotProduct for Wasm32Isa {
     /// in https://github.com/WebAssembly/relaxed-simd/issues/52.
     #[inline]
     fn dot_product(self, a: Self::X8, b: Self::X8, c: Self::I32) -> Self::I32 {
+        #[cfg(target_feature = "relaxed-simd")]
+        {
+            use std::arch::wasm32::{
+                i32x4_add, i32x4_relaxed_dot_i8x16_i7x16_add, i32x4_shl,
+                i8x16_splat, u8x16_shr, v128_and, v128_xor,
+            };
+
+            // The generic Wasm kernel stores both operands as full-range u8.
+            // Express each byte as `(signed_a + 128) * (low7_b + 128*high_b)`
+            // so every relaxed-dot RHS is guaranteed to be in 0..=127. This
+            // preserves exact u8 dot products on every conforming relaxed-SIMD
+            // implementation instead of relying on its intentionally relaxed
+            // signedness for bytes with the high bit set.
+            let zero = i8x16_splat(0);
+            let signed_a = v128_xor(a.0, i8x16_splat(i8::MIN));
+            let low7_b = v128_and(b.0, i8x16_splat(0x7f));
+            let high_b = u8x16_shr(b.0, 7);
+            let ones = i8x16_splat(1);
+            let signed_low = i32x4_relaxed_dot_i8x16_i7x16_add(signed_a, low7_b, c.0);
+            let signed_high =
+                i32x4_relaxed_dot_i8x16_i7x16_add(signed_a, high_b, zero);
+            let low_sum = i32x4_relaxed_dot_i8x16_i7x16_add(ones, low7_b, zero);
+            let high_sum = i32x4_relaxed_dot_i8x16_i7x16_add(ones, high_b, zero);
+            return i32x4_add(
+                i32x4_add(signed_low, i32x4_shl(signed_high, 7)),
+                i32x4_add(i32x4_shl(low_sum, 7), i32x4_shl(high_sum, 14)),
+            )
+            .into();
+        }
+
+        #[cfg(not(target_feature = "relaxed-simd"))]
+        {
         use std::arch::wasm32::{
             i32x4_add, i32x4_extadd_pairwise_u16x8, i32x4_shuffle, u16x8_extmul_high_u8x16,
             u16x8_extmul_low_u8x16,
@@ -367,5 +403,6 @@ unsafe impl Int8DotProduct for Wasm32Isa {
 
         let quad_sum = i32x4_add(pair_sum_even, pair_sum_odd);
         i32x4_add(quad_sum, c.0).into()
+        }
     }
 }

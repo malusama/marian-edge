@@ -292,10 +292,10 @@ pub(crate) fn attention_into(
                 let active_scores = &mut scores[..active_keys];
                 for (key_index, score) in active_scores.iter_mut().enumerate() {
                     let key_base = (batch_index * key_length + key_index) * dim + head * head_dim;
-                    let mut dot = 0.0_f32;
-                    for index in 0..head_dim {
-                        dot += query[query_base + index] * key[key_base + index];
-                    }
+                    let dot = dot_f32(
+                        &query[query_base..query_base + head_dim],
+                        &key[key_base..key_base + head_dim],
+                    );
                     *score = dot * attention_scale;
                 }
                 softmax_in_place(active_scores);
@@ -381,9 +381,103 @@ fn normalize_row(row: &mut [f32], scale: &[f32], bias: &[f32]) {
         .sum::<f32>()
         / dim;
     let inverse_std = 1.0 / (variance + LAYER_NORM_EPSILON).sqrt();
-    for ((value, &gain), &offset) in row.iter_mut().zip(scale).zip(bias) {
-        *value = (*value - mean) * inverse_std * gain + offset;
+    normalize_affine_in_place(row, scale, bias, mean, inverse_std);
+}
+
+fn normalize_affine_in_place(
+    row: &mut [f32],
+    scale: &[f32],
+    bias: &[f32],
+    mean: f32,
+    inverse_std: f32,
+) {
+    debug_assert_eq!(row.len(), scale.len());
+    debug_assert_eq!(row.len(), bias.len());
+    #[allow(unused_mut)]
+    let mut index = 0;
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::{
+            f32x4_add, f32x4_mul, f32x4_splat, f32x4_sub, v128_load, v128_store,
+        };
+        let mean = f32x4_splat(mean);
+        let inverse_std = f32x4_splat(inverse_std);
+        while index + 4 <= row.len() {
+            // SAFETY: The loop condition proves four in-bounds elements in all
+            // three equally-sized slices. SIMD128 is mandatory in the Worker.
+            unsafe {
+                let normalized = f32x4_mul(
+                    f32x4_sub(v128_load(row.as_ptr().add(index).cast()), mean),
+                    inverse_std,
+                );
+                let affine = f32x4_add(
+                    f32x4_mul(normalized, v128_load(scale.as_ptr().add(index).cast())),
+                    v128_load(bias.as_ptr().add(index).cast()),
+                );
+                v128_store(row.as_mut_ptr().add(index).cast(), affine);
+            }
+            index += 4;
+        }
     }
+    for index in index..row.len() {
+        row[index] = (row[index] - mean) * inverse_std * scale[index] + bias[index];
+    }
+}
+
+#[inline]
+fn dot_f32(lhs: &[f32], rhs: &[f32]) -> f32 {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::{
+            f32x4_add, f32x4_extract_lane, f32x4_mul, f32x4_splat, v128_load,
+        };
+        let mut sums = [f32x4_splat(0.0); 4];
+        let mut index = 0;
+        while index + 16 <= lhs.len() {
+            for lane in 0..4 {
+                let offset = index + lane * 4;
+                // SAFETY: The loop condition proves four complete vectors.
+                unsafe {
+                    sums[lane] = f32x4_add(
+                        sums[lane],
+                        f32x4_mul(
+                            v128_load(lhs.as_ptr().add(offset).cast()),
+                            v128_load(rhs.as_ptr().add(offset).cast()),
+                        ),
+                    );
+                }
+            }
+            index += 16;
+        }
+        while index + 4 <= lhs.len() {
+            // SAFETY: The loop condition proves one complete vector.
+            unsafe {
+                sums[0] = f32x4_add(
+                    sums[0],
+                    f32x4_mul(
+                        v128_load(lhs.as_ptr().add(index).cast()),
+                        v128_load(rhs.as_ptr().add(index).cast()),
+                    ),
+                );
+            }
+            index += 4;
+        }
+        let sum = sums
+            .into_iter()
+            .reduce(|left, right| f32x4_add(left, right))
+            .expect("four sums");
+        let mut result = f32x4_extract_lane::<0>(sum)
+            + f32x4_extract_lane::<1>(sum)
+            + f32x4_extract_lane::<2>(sum)
+            + f32x4_extract_lane::<3>(sum);
+        for index in index..lhs.len() {
+            result += lhs[index] * rhs[index];
+        }
+        return result;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    lhs.iter().zip(rhs).map(|(&a, &b)| a * b).sum()
 }
 
 fn add_slices(lhs: &[f32], rhs: &[f32], output: &mut [f32]) {
@@ -411,6 +505,21 @@ fn add_slices(lhs: &[f32], rhs: &[f32], output: &mut [f32]) {
         if std::arch::is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 was runtime-detected; the helper bounds all loads.
             offset = unsafe { add_slices_avx2(lhs, rhs, output) };
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::{f32x4_add, v128_load, v128_store};
+        while offset + 4 <= lhs.len() {
+            // SAFETY: The loop condition proves four elements in every slice.
+            unsafe {
+                let sum = f32x4_add(
+                    v128_load(lhs.as_ptr().add(offset).cast()),
+                    v128_load(rhs.as_ptr().add(offset).cast()),
+                );
+                v128_store(output.as_mut_ptr().add(offset).cast(), sum);
+            }
+            offset += 4;
         }
     }
     for index in offset..lhs.len() {
@@ -441,6 +550,21 @@ fn add_in_place(values: &mut [f32], offsets: &[f32]) {
         if std::arch::is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 was detected and the helper bounds every access.
             index = unsafe { add_in_place_avx2(values, offsets) };
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::{f32x4_add, v128_load, v128_store};
+        while index + 4 <= values.len() {
+            // SAFETY: The loop condition proves four elements in both slices.
+            unsafe {
+                let sum = f32x4_add(
+                    v128_load(values.as_ptr().add(index).cast()),
+                    v128_load(offsets.as_ptr().add(index).cast()),
+                );
+                v128_store(values.as_mut_ptr().add(index).cast(), sum);
+            }
+            index += 4;
         }
     }
     for index in index..values.len() {
@@ -491,6 +615,22 @@ fn weighted_add_in_place(output: &mut [f32], values: &[f32], weight: f32) {
             index = unsafe { weighted_add_in_place_avx2(output, values, weight) };
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::{f32x4_add, f32x4_mul, f32x4_splat, v128_load, v128_store};
+        let weight_vector = f32x4_splat(weight);
+        while index + 4 <= output.len() {
+            // SAFETY: The loop condition proves four elements in both slices.
+            unsafe {
+                let sum = f32x4_add(
+                    v128_load(output.as_ptr().add(index).cast()),
+                    f32x4_mul(v128_load(values.as_ptr().add(index).cast()), weight_vector),
+                );
+                v128_store(output.as_mut_ptr().add(index).cast(), sum);
+            }
+            index += 4;
+        }
+    }
     for index in index..output.len() {
         output[index] += values[index] * weight;
     }
@@ -537,6 +677,19 @@ fn relu_values_in_place(values: &mut [f32]) {
         if std::arch::is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 was detected and the helper bounds every access.
             index = unsafe { relu_values_in_place_avx2(values) };
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::{f32x4_max, f32x4_splat, v128_load, v128_store};
+        let zero = f32x4_splat(0.0);
+        while index + 4 <= values.len() {
+            // SAFETY: The loop condition proves four elements in the slice.
+            unsafe {
+                let positive = f32x4_max(v128_load(values.as_ptr().add(index).cast()), zero);
+                v128_store(values.as_mut_ptr().add(index).cast(), positive);
+            }
+            index += 4;
         }
     }
     for value in &mut values[index..] {
@@ -620,6 +773,19 @@ fn scale_in_place(values: &mut [f32], scale: f32) {
         if std::arch::is_x86_feature_detected!("avx2") {
             // SAFETY: AVX2 was detected and the helper bounds every access.
             index = unsafe { scale_in_place_avx2(values, scale) };
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::{f32x4_mul, f32x4_splat, v128_load, v128_store};
+        let scale_vector = f32x4_splat(scale);
+        while index + 4 <= values.len() {
+            // SAFETY: The loop condition proves four elements in the slice.
+            unsafe {
+                let scaled = f32x4_mul(v128_load(values.as_ptr().add(index).cast()), scale_vector);
+                v128_store(values.as_mut_ptr().add(index).cast(), scaled);
+            }
+            index += 4;
         }
     }
     for value in &mut values[index..] {

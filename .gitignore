@@ -2,6 +2,7 @@
 /build/
 /models/
 /dist/
+/worker/.wrangler/
 /.cache/
 *.npz
 *.safetensors

@@ -1,4 +1,4 @@
-//! Exact Q8 dot products optimized for Armv8.2-A dot-product hardware.
+//! Exact Q8 shortlist dot products optimized for Arm and WebAssembly SIMD.
 //!
 //! Apple M1 and newer CPUs implement `SDOT`. The generic Q8 matrix path uses
 //! rten-gemm's architecture-specific kernels, but lexical-shortlist scoring is
@@ -31,6 +31,18 @@ pub(crate) fn dot_u8_i8(activations: &[u8], weights: &[i8]) -> i32 {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
+    {
+        // The Worker build enables SIMD128 globally. This path is exact for
+        // the full Marian activation/weight range and handles any tail
+        // scalarly.
+        return unsafe { dot_u8_i8_wasm(activations, weights) };
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "wasm32")))]
+    return dot_u8_i8_scalar(activations, weights);
+
+    #[cfg(target_arch = "aarch64")]
     dot_u8_i8_scalar(activations, weights)
 }
 
@@ -43,6 +55,139 @@ fn dot_u8_i8_scalar(activations: &[u8], weights: &[i8]) -> i32 {
             (i32::from(activation) - i32::from(ACTIVATION_ZERO_POINT)) * i32::from(weight)
         })
         .sum()
+}
+
+#[cfg(target_arch = "wasm32")]
+unsafe fn dot_u8_i8_wasm(activations: &[u8], weights: &[i8]) -> i32 {
+    use core::arch::wasm32::{
+        i8x16_splat, i8x16_sub, i32x4_add, i32x4_extract_lane, i32x4_splat, v128, v128_load,
+    };
+
+    #[cfg(not(target_feature = "relaxed-simd"))]
+    #[inline(always)]
+    unsafe fn accumulate_stable(
+        accumulator: v128,
+        activation: *const u8,
+        weight: *const i8,
+    ) -> v128 {
+        use core::arch::wasm32::{
+            i16x8_extmul_high_i8x16, i16x8_extmul_low_i8x16, i32x4_extadd_pairwise_i16x8,
+        };
+        // SAFETY: The caller only supplies complete 16-byte chunks.
+        let activation = unsafe { v128_load(activation.cast()) };
+        let centered = i8x16_sub(activation, i8x16_splat(127));
+        // SAFETY: The caller only supplies complete 16-byte chunks.
+        let weight = unsafe { v128_load(weight.cast()) };
+        let low = i16x8_extmul_low_i8x16(centered, weight);
+        let high = i16x8_extmul_high_i8x16(centered, weight);
+        i32x4_add(
+            accumulator,
+            i32x4_add(
+                i32x4_extadd_pairwise_i16x8(low),
+                i32x4_extadd_pairwise_i16x8(high),
+            ),
+        )
+    }
+
+    #[cfg(target_feature = "relaxed-simd")]
+    #[inline(always)]
+    unsafe fn accumulate_relaxed(
+        accumulator: v128,
+        correction: v128,
+        activation: *const u8,
+        weight: *const i8,
+    ) -> (v128, v128) {
+        use core::arch::wasm32::{i32x4_relaxed_dot_i8x16_i7x16_add, u8x16_shr, v128_and};
+
+        // A signed weight is `low7 - 128 * sign_bit`. Both low7 and
+        // sign_bit satisfy the relaxed dot instruction's i7 operand contract,
+        // so two native-friendly dots reproduce the exact signed product.
+        let activation = i8x16_sub(unsafe { v128_load(activation.cast()) }, i8x16_splat(127));
+        let weight = unsafe { v128_load(weight.cast()) };
+        let low7 = v128_and(weight, i8x16_splat(0x7f));
+        let sign = u8x16_shr(weight, 7);
+        (
+            i32x4_relaxed_dot_i8x16_i7x16_add(activation, low7, accumulator),
+            i32x4_relaxed_dot_i8x16_i7x16_add(activation, sign, correction),
+        )
+    }
+
+    debug_assert_eq!(activations.len(), weights.len());
+    let mut accumulators = [i32x4_splat(0); 4];
+    #[cfg(target_feature = "relaxed-simd")]
+    let mut corrections = accumulators;
+    let mut offset = 0;
+    while offset + 64 <= activations.len() {
+        for lane in 0..4 {
+            let chunk = offset + lane * 16;
+            #[cfg(target_feature = "relaxed-simd")]
+            {
+                (accumulators[lane], corrections[lane]) = unsafe {
+                    accumulate_relaxed(
+                        accumulators[lane],
+                        corrections[lane],
+                        activations.as_ptr().add(chunk),
+                        weights.as_ptr().add(chunk),
+                    )
+                };
+            }
+            #[cfg(not(target_feature = "relaxed-simd"))]
+            {
+                accumulators[lane] = unsafe {
+                    accumulate_stable(
+                        accumulators[lane],
+                        activations.as_ptr().add(chunk),
+                        weights.as_ptr().add(chunk),
+                    )
+                };
+            }
+        }
+        offset += 64;
+    }
+    while offset + 16 <= activations.len() {
+        #[cfg(target_feature = "relaxed-simd")]
+        {
+            (accumulators[0], corrections[0]) = unsafe {
+                accumulate_relaxed(
+                    accumulators[0],
+                    corrections[0],
+                    activations.as_ptr().add(offset),
+                    weights.as_ptr().add(offset),
+                )
+            };
+        }
+        #[cfg(not(target_feature = "relaxed-simd"))]
+        {
+            accumulators[0] = unsafe {
+                accumulate_stable(
+                    accumulators[0],
+                    activations.as_ptr().add(offset),
+                    weights.as_ptr().add(offset),
+                )
+            };
+        }
+        offset += 16;
+    }
+
+    #[allow(unused_mut)]
+    let mut sum = accumulators
+        .into_iter()
+        .reduce(|left, right| i32x4_add(left, right))
+        .expect("four accumulators");
+    #[cfg(target_feature = "relaxed-simd")]
+    {
+        use core::arch::wasm32::{i32x4_shl, i32x4_sub};
+        let correction = corrections
+            .into_iter()
+            .reduce(|left, right| i32x4_add(left, right))
+            .expect("four corrections");
+        sum = i32x4_sub(sum, i32x4_shl(correction, 7));
+    }
+    let vector_sum = i32x4_extract_lane::<0>(sum)
+        + i32x4_extract_lane::<1>(sum)
+        + i32x4_extract_lane::<2>(sum)
+        + i32x4_extract_lane::<3>(sum);
+    vector_sum + dot_u8_i8_scalar(&activations[offset..], &weights[offset..])
 }
 
 #[cfg(target_arch = "aarch64")]

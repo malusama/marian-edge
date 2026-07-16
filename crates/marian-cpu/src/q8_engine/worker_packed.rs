@@ -10,6 +10,9 @@ use super::{
 const METADATA_MAGIC: &[u8; 8] = b"MARIWPK2";
 const BUNDLE_MAGIC: &[u8; 8] = b"MARIBND2";
 const VERSION: u32 = 2;
+#[cfg(all(target_arch = "wasm32", target_feature = "relaxed-simd"))]
+const WASM_KERNEL: &str = "wasm-u8i8i32-relaxed";
+#[cfg(not(all(target_arch = "wasm32", target_feature = "relaxed-simd")))]
 const WASM_KERNEL: &str = "wasm-u8i8i32";
 const MAX_STRING_BYTES: usize = 256;
 const BUNDLE_HEADER_BYTES: usize = 8 + 4 + 4 * 4;

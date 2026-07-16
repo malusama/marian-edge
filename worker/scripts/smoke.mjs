@@ -135,3 +135,27 @@ for (const text of [
     result: result(),
   });
 }
+
+
+const batchTexts = [
+  "Hello, world!",
+  "The weather is beautiful today.",
+  "Please open the window.",
+  "Thank you for your help!",
+];
+const batchBytes = new TextEncoder().encode(JSON.stringify(batchTexts));
+const [batchPointer, batchLength] = transfer(batchBytes);
+const batchStarted = performance.now();
+const batchStatus = exports.translate_batch_json(batchPointer, batchLength, 128);
+const batchMilliseconds = performance.now() - batchStarted;
+exports.dealloc(batchPointer, batchLength);
+const batchResult = result();
+console.log({
+  phase: "translate-batch",
+  status: batchStatus,
+  milliseconds: batchMilliseconds,
+  batchSize: batchTexts.length,
+  wasmMemoryMiB: exports.memory_bytes() / 1024 / 1024,
+  result: batchResult,
+});
+if (batchStatus !== 0 || batchResult.length !== batchTexts.length) process.exit(1);

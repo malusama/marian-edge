@@ -2,9 +2,11 @@
   "name": "marian-edge-worker",
   "private": true,
   "scripts": {
-    "build:wasm": "RUSTFLAGS='-C target-feature=+simd128' cargo build -p marian-worker-wasm --target wasm32-unknown-unknown --release && mkdir -p dist && cp ../target/wasm32-unknown-unknown/release/marian_worker_wasm.wasm dist/",
+    "build:wasm": "RUSTFLAGS='-C target-feature=+simd128,+relaxed-simd' cargo build -p marian-worker-wasm --target wasm32-unknown-unknown --release && mkdir -p dist && cp ../target/wasm32-unknown-unknown/release/marian_worker_wasm.wasm dist/",
     "pack:model": "node scripts/pack-model.mjs",
     "smoke:packed": "node scripts/smoke.mjs --packed",
+    "bench:wasm": "node scripts/bench-wasm.mjs",
+    "bench:http": "node scripts/bench-http.mjs",
     "deploy": "npm run build:wasm && npx wrangler deploy --config wrangler.jsonc"
   },
   "devDependencies": {

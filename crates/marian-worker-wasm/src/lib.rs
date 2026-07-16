@@ -4,6 +4,8 @@ use marian_core::{TranslationBackend, TranslationInput};
 use marian_cpu::{ModelManifest, Q8CpuBackend, Q8CpuEngine};
 use serde::Serialize;
 
+const MAXIMUM_WORKER_BATCH: usize = 16;
+
 thread_local! {
     static BACKEND: RefCell<Option<Q8CpuBackend>> = const { RefCell::new(None) };
     static RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -14,6 +16,16 @@ struct ApiOutput {
     text: String,
     input_tokens: usize,
     output_tokens: usize,
+}
+
+impl From<marian_core::TranslationOutput> for ApiOutput {
+    fn from(output: marian_core::TranslationOutput) -> Self {
+        Self {
+            text: output.text,
+            input_tokens: output.input_tokens,
+            output_tokens: output.output_tokens,
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -223,12 +235,69 @@ pub unsafe extern "C" fn translate(
             .into_iter()
             .next()
             .ok_or_else(|| "backend returned no output".to_string())?;
-        serde_json::to_vec(&ApiOutput {
-            text: output.text,
-            input_tokens: output.input_tokens,
-            output_tokens: output.output_tokens,
-        })
-        .map_err(|error| error.to_string())
+        serde_json::to_vec(&ApiOutput::from(output)).map_err(|error| error.to_string())
+    });
+    match result {
+        Ok(bytes) => {
+            set_result(bytes);
+            0
+        }
+        Err(error) => {
+            set_error(error);
+            1
+        }
+    }
+}
+
+/// Translate a JSON string array as one real model batch. The JS host keeps
+/// the input allocation and releases it after this call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn translate_batch_json(
+    pointer: *const u8,
+    length: usize,
+    max_output_tokens: usize,
+) -> i32 {
+    let bytes = unsafe { slice::from_raw_parts(pointer, length) };
+    let texts = match serde_json::from_slice::<Vec<String>>(bytes) {
+        Ok(texts) if !texts.is_empty() && texts.len() <= MAXIMUM_WORKER_BATCH => texts,
+        Ok(texts) => {
+            set_error(format!(
+                "batch contains {} texts; expected 1..={MAXIMUM_WORKER_BATCH}",
+                texts.len()
+            ));
+            return 1;
+        }
+        Err(error) => {
+            set_error(format!("batch input is not a JSON string array: {error}"));
+            return 1;
+        }
+    };
+    if texts.iter().any(String::is_empty) {
+        set_error("batch texts must be non-empty".into());
+        return 1;
+    }
+
+    let result = BACKEND.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let backend = slot
+            .as_mut()
+            .ok_or_else(|| "model is not initialized".to_string())?;
+        let limit = max_output_tokens.clamp(1, 128);
+        let inputs = texts
+            .into_iter()
+            .map(|text| {
+                let mut input = TranslationInput::new(text, "en", "zh");
+                input.max_output_tokens = limit;
+                input
+            })
+            .collect::<Vec<_>>();
+        let outputs = backend
+            .translate_batch(&inputs)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(ApiOutput::from)
+            .collect::<Vec<_>>();
+        serde_json::to_vec(&outputs).map_err(|error| error.to_string())
     });
     match result {
         Ok(bytes) => {
