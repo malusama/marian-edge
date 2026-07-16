@@ -17,8 +17,8 @@ precompiled Metal library.
 - License: Apache License 2.0
 - Use: source and target model tokenization
 
-`marian-tokenizer` wraps this from-scratch Rust implementation of SentencePiece
-inference. It reads the existing `.spm` model format without linking or
+`marian-tokenizer` uses this pure-Rust SentencePiece implementation. It reads
+the existing `.spm` model format without linking or
 redistributing the native Google SentencePiece library. A verbatim copy of the
 crate's license is distributed as [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0).
 

@@ -1,6 +1,46 @@
-# Performance qualification
+# Benchmark notes
 
-## v0.6.0 live first-version comparison (2026-07-16)
+Results in different sections used different commits, host load, and workloads.
+Compare rows within the same table; do not treat the largest number in this
+file as a current product claim.
+
+## Exploratory beam-width reference (2026-07-16)
+
+The current Rust backends implement only `beam=1`, so this comparison used the
+Mozilla Marian fork at commit
+[`f31423c7`](https://github.com/mozilla/translations/tree/f31423c7c2c6ed8ae57d71a3d19a9db6f156060e)
+with the same Q8 model artifact
+(`4e5accc141373565ddc8fa1565bceaa8d0c3482a82cab8131c719ebcc6c2157c`).
+It ran on the M1 test host with one CPU thread and mini-batch 16. The timed input
+was the 1,012-sentence FLORES-200 `devtest` English source. Machine-readable
+metadata and output hashes are in
+[`beam-width-reference-m1pro.json`](../benchmarks/results/beam-width-reference-m1pro.json).
+
+| Beam | Elapsed | Change from beam 1 | BLEU | chrF2++ |
+|---:|---:|---:|---:|---:|
+| 1 | 12.32 s | baseline | 38.8 | 25.0 |
+| 2 | 16.45 s | +33.5% | 39.5 | 25.4 |
+| 4 | 23.19 s | +88.2% | 39.7 | 25.6 |
+
+Scores use SacreBLEU 2.5.1 with the Chinese BLEU tokenizer and chrF2++
+(`char_order=6`, `word_order=2`). Paired bootstrap resampling with 1,000 samples
+found both wider-beam outputs different from beam 1 at `p<=0.002` on both
+metrics. Beam 4 gained only 0.2 BLEU and 0.2 chrF2++ over beam 2 while taking
+41% longer than beam 2.
+
+All five release golden sentences were unchanged. On the repository's
+200-item engineering corpus, beam 1 to 2 changed 56 outputs, and beam 2 to 4
+changed another 36. Spot checks found both improvements and regressions, so an
+automatic-score gain is not a substitute for a webpage-focused human sample.
+
+Mozilla's browser evaluation and quantization configurations also use
+[`beam-size: 1`](https://github.com/mozilla/translations/blob/f31423c7c2c6ed8ae57d71a3d19a9db6f156060e/pipeline/eval/translators.py#L410-L425),
+and its training guide uses beam 1 for tiny/base-memory students while using
+beam 4 for the teacher. The current low-latency default therefore stays at 1.
+Beam 2 is the measured speed/automatic-quality compromise for a future quality
+mode; beam 4 is not a good default for this local-service workload.
+
+## v0.6.0 pre-release candidate versus v0.1.0 (2026-07-16)
 
 The v0.1.0 tag was rebuilt against its original MLX bridge and run immediately
 before the final direct-Metal release candidate on the same Apple M1 / 16 GB
@@ -13,11 +53,11 @@ not mixed into this table.
 | Runtime | Workload | Throughput | p50 | p95 | Peak RSS | Output hashes/run |
 |---|---|---:|---:|---:|---:|---:|
 | v0.1.0 MLX FP32 | 1,000 short requests | 486.64 item/s | 66.74 ms | 77.80 ms | 205,632 KiB | 1 |
-| v0.6.0 direct Metal FP32 | 1,000 short requests | 546.19 item/s | 63.09 ms | 68.20 ms | 252,240 KiB | 1 |
+| v0.6.0 pre-release candidate, direct Metal FP32 | 1,000 short requests | 546.19 item/s | 63.09 ms | 68.20 ms | 252,240 KiB | 1 |
 | v0.1.0 MLX FP32 | 5 x 200-item corpus | 116.68 item/s | 1622.82 ms | 2116.16 ms | 214,448 KiB | 5 |
-| v0.6.0 direct Metal FP32 | 5 x 200-item corpus | 149.14 item/s | 1336.02 ms | 1385.14 ms | 257,088 KiB | 1 |
+| v0.6.0 pre-release candidate, direct Metal FP32 | 5 x 200-item corpus | 149.14 item/s | 1336.02 ms | 1385.14 ms | 257,088 KiB | 1 |
 
-The final runtime is 12.2% faster than the first release on repeated short
+The candidate is 12.2% faster than the first release on repeated short
 traffic and 27.8% faster on 200 distinct items. It is also 10.1% and 18.0%
 faster than a live v0.5.0 binary measured in the same loaded desktop window.
 The v0.1.0 corpus produced a different response hash for every one of its five
@@ -25,9 +65,9 @@ identical request bodies; the final runtime produced one stable hash. Peak RSS
 is recorded for deployment sizing but includes macOS shared-GPU and purgeable
 page behavior, so it is not used as an allocator comparison.
 
-### Final FlashAttention-style A/B
+### Candidate FlashAttention-style A/B
 
-This A/B changes only `MARIAN_EDGE_METAL_ATTENTION` in the final binary. Flash
+This A/B changes only `MARIAN_EDGE_METAL_ATTENTION` in the candidate binary. Flash
 and classic produced identical output hashes for both workloads.
 
 | Workload | Classic | Flash q4 auto | Throughput change | Flash p50 | Flash p95 |
@@ -41,7 +81,7 @@ O(N^2) score matrix. Its low-level oracle covers key lengths 31/32/33 and
 multiple heads/dimensions; real Metal FP32 matched CPU FP32 on 200/200 corpus
 items. Mixed-F16 remained explicit at 198/200, with mismatches 116 and 192.
 
-### Final Metal trace
+### Candidate Metal trace
 
 A 300-request Instruments trace recorded 40 submitted and 40 completed command
 buffers, zero errors, and no command buffer without GPU intervals. Labels show
@@ -135,7 +175,7 @@ of the request:
 | 160 | 285.12 ms | 236.00 ms | -17.2% |
 | 320 | 784.58 ms | 576.29 ms | -26.5% |
 
-## Current M1 deployment sweet spot
+## M1 settings tested for v0.6.0
 
 The qualified exact-output configuration is FP32, Flash `auto`, maximum batch
 16, a 750 us batching window, and about 32 concurrent short requests. `/info`
@@ -240,20 +280,22 @@ execution-point rows, and no command errors. Table rows are profiler evidence,
 not a count of unique application command buffers. Reproduce the capture with
 `tools/profile_metal.sh`; the 117 MB trace itself is not checked into Git.
 
-Reproduce the HTTP measurements with:
+Reproduce the HTTP measurements against the backend that is actually running:
 
 ```sh
+SERVICE_ORIGIN=${SERVICE_ORIGIN:-http://127.0.0.1:3000}
+PORT=${SERVICE_ORIGIN##*:}
 python3 tools/bench_http.py \
-  --url http://127.0.0.1:3000/translate \
+  --url "$SERVICE_ORIGIN/translate" \
   --requests 500 --concurrency 32 --warmup 32 \
-  --model-dir models/enzh --pid "$(lsof -tiTCP:3000 -sTCP:LISTEN)" \
+  --model-dir models/enzh --pid "$(lsof -tiTCP:"$PORT" -sTCP:LISTEN)" \
   --threads 1 --commit "$(git rev-parse HEAD)" --output result.json
 
 python3 tools/bench_http.py \
-  --url http://127.0.0.1:3000/imme \
+  --url "$SERVICE_ORIGIN/imme" \
   --corpus benchmarks/corpus-v1.jsonl \
   --requests 5 --concurrency 1 --warmup 1 \
-  --model-dir models/enzh --pid "$(lsof -tiTCP:3000 -sTCP:LISTEN)" \
+  --model-dir models/enzh --pid "$(lsof -tiTCP:"$PORT" -sTCP:LISTEN)" \
   --threads 1 --commit "$(git rev-parse HEAD)" --output corpus-result.json
 ```
 
@@ -291,7 +333,7 @@ Historical MLX concurrency sweep (300 measured requests at each level):
 The old peak varied between runs. Its concurrency recommendation must not be
 carried over to the direct Metal backend without a new sweep.
 
-## Current Q8 CPU qualification and allocation result
+## Historical Q8 CPU measurements
 
 This section records historical engineering measurements. The exact five-item
 golden expectations remain in tests, but the raw 200-item per-output comparison

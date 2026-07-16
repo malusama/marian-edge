@@ -4,7 +4,7 @@ We want this project to be a focused, welcoming place to build reliable local
 translation software.
 
 Be respectful, discuss the technical work rather than the person, give
-actionable feedback, and assume good faith while evidence is being gathered.
+actionable feedback, and assume good faith.
 Harassment, discriminatory language, threats, deliberate disruption, and
 publishing another person's private information are not acceptable.
 

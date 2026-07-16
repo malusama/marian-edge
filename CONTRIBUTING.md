@@ -9,7 +9,7 @@ failure case or benchmark are easiest to review.
 2. Keep generated models, weights, build directories, and benchmark dumps out
    of Git. They are intentionally ignored.
 3. Add tests for behavior changes and document user-visible flags or endpoints.
-4. Run `make check` on every change; it includes documentation contracts.
+4. Run `make check` on every change; it includes documentation checks.
 
 The portable checks do not need Metal or a model. On Apple Silicon, changes to
 the native backend should additionally run:
@@ -36,7 +36,7 @@ an external `.metallib`.
 The ignored golden test is a smoke test, not a corpus-level quality result.
 Performance changes should include the exact machine, precision, request
 corpus, warmup, concurrency, and command. Do not claim GPU execution without a
-Metal trace or equivalent device evidence.
+Metal trace or equivalent profiler output.
 
 ## Code conventions
 
@@ -49,7 +49,7 @@ Metal trace or equivalent device evidence.
 - Keep model ownership separate from kernel parallelism: the CPU model has one
   owner, while the configured 1/2/4 compute threads may participate in both
   FP32 matrix multiplication and Q8 row-parallel kernels.
-- Keep the runtime boundary explicit: `marian-tokenizer`, `marian-cpu`, the
+- Keep crate responsibilities clear: `marian-tokenizer`, `marian-cpu`, the
   long-text segmenter, and the Metal host are Rust; `objc2-metal` calls the
   system Metal framework on macOS.
 - Q8 changes must retain strict tensor-set, shape, quantization, shortlist, and
