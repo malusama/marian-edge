@@ -124,8 +124,18 @@ impl ModelManifest {
         let bytes = fs::read(&path).map_err(|error| {
             BackendError::Model(format!("failed to read {}: {error}", path.display()))
         })?;
-        let manifest: Self = serde_json::from_slice(&bytes)
-            .map_err(|error| BackendError::Model(format!("invalid {}: {error}", path.display())))?;
+        Self::from_bytes(&bytes).map_err(|error| match error {
+            BackendError::Model(message) => {
+                BackendError::Model(format!("invalid {}: {message}", path.display()))
+            }
+            other => other,
+        })
+    }
+
+    /// Parses and validates a model manifest from memory.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, BackendError> {
+        let manifest: Self = serde_json::from_slice(bytes)
+            .map_err(|error| BackendError::Model(error.to_string()))?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -153,6 +163,45 @@ impl ModelManifest {
             (None, Some(_)) => {
                 return Err(BackendError::Model(
                     "manifest has shortlist_sha256 without a shortlist".into(),
+                ));
+            }
+            (None, None) => {}
+        }
+        Ok(())
+    }
+
+    /// Verifies the same runtime artifacts when a sandboxed host provides
+    /// their bytes directly instead of filesystem paths.
+    pub fn verify_runtime_bytes(
+        &self,
+        weights: &[u8],
+        source_vocab: &[u8],
+        target_vocab: &[u8],
+        shortlist: Option<&[u8]>,
+    ) -> Result<(), BackendError> {
+        verify_sha256_bytes("weights", weights, &self.checksums.weights_sha256)?;
+        verify_sha256_bytes(
+            "source vocabulary",
+            source_vocab,
+            &self.checksums.source_vocab_sha256,
+        )?;
+        verify_sha256_bytes(
+            "target vocabulary",
+            target_vocab,
+            &self.checksums.target_vocab_sha256,
+        )?;
+        match (shortlist, &self.checksums.shortlist_sha256) {
+            (Some(bytes), Some(expected)) => {
+                verify_sha256_bytes("shortlist", bytes, expected)?;
+            }
+            (Some(_), None) => {
+                return Err(BackendError::Model(
+                    "manifest has a shortlist without shortlist_sha256".into(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(BackendError::Model(
+                    "manifest has shortlist_sha256 without shortlist bytes".into(),
                 ));
             }
             (None, None) => {}
@@ -210,6 +259,21 @@ fn verify_sha256(path: &Path, expected: &str) -> Result<(), BackendError> {
         return Err(BackendError::Model(format!(
             "checksum mismatch for {}: expected {expected}, got {actual}",
             path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn verify_sha256_bytes(label: &str, bytes: &[u8], expected: &str) -> Result<(), BackendError> {
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(BackendError::Model(format!(
+            "invalid SHA-256 in manifest for {label}"
+        )));
+    }
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(BackendError::Model(format!(
+            "checksum mismatch for {label}: expected {expected}, got {actual}"
         )));
     }
     Ok(())

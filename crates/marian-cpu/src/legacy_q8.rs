@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
-    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
 
+#[cfg(not(target_arch = "wasm32"))]
 use memmap2::MmapOptions;
 
 use crate::{Q8Error, Q8Linear};
@@ -64,6 +67,10 @@ pub struct MarianTensor {
 }
 
 impl MarianTensor {
+    fn is_intgemm8(&self) -> bool {
+        matches!(&self.data, MarianTensorData::Intgemm8 { .. })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -135,6 +142,7 @@ pub struct MarianBinaryModel {
 }
 
 impl MarianBinaryModel {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Q8Error> {
         let path = path.as_ref();
         let metadata = fs::metadata(path).map_err(|source| Q8Error::Io {
@@ -432,6 +440,60 @@ impl MarianBinaryModel {
             .ok_or_else(|| Q8Error::MissingTensor(name.to_owned()))
     }
 
+    pub(crate) fn take_intgemm8(
+        &mut self,
+        name: &str,
+    ) -> Result<(Vec<i8>, f32, Vec<usize>), Q8Error> {
+        let index = *self
+            .by_name
+            .get(name)
+            .ok_or_else(|| Q8Error::MissingTensor(name.to_owned()))?;
+        let tensor = &mut self.tensors[index];
+        let shape = tensor.shape.clone();
+        let data = std::mem::replace(
+            &mut tensor.data,
+            MarianTensorData::Intgemm8 {
+                values: Vec::new(),
+                quant_mult: 1.0,
+            },
+        );
+        match data {
+            MarianTensorData::Intgemm8 { values, quant_mult } => Ok((values, quant_mult, shape)),
+            _ => Err(Q8Error::tensor(name, "expected intgemm8 tensor")),
+        }
+    }
+
+    pub(crate) fn take_dense_linear(
+        &mut self,
+        weight_name: &str,
+        bias_name: Option<&str>,
+        input_dim: usize,
+        output_dim: usize,
+    ) -> Result<Q8Linear, Q8Error> {
+        let weight = self.tensor(weight_name)?;
+        if weight.shape != [input_dim, output_dim] {
+            return Err(Q8Error::tensor(
+                weight_name,
+                format!(
+                    "dense header shape is {:?}, expected [{input_dim}, {output_dim}]",
+                    weight.shape
+                ),
+            ));
+        }
+        let activation_quant_mult = self.activation_scale_for(weight_name)?;
+        let bias = self.load_bias(bias_name, output_dim)?;
+        let (values, weight_quant_mult, _) = self.take_intgemm8(weight_name)?;
+        Q8Linear::new(
+            weight_name,
+            input_dim,
+            output_dim,
+            values,
+            activation_quant_mult,
+            weight_quant_mult,
+            bias,
+        )
+    }
+
     /// Validate Q8 tensors and all activation-scale relationships.
     pub fn validate_q8(&self) -> Result<Q8ValidationReport, Q8Error> {
         let mut report = Q8ValidationReport {
@@ -444,7 +506,7 @@ impl MarianBinaryModel {
             if let Some(weight_name) = tensor.name.strip_suffix(ACTIVATION_SCALE_SUFFIX) {
                 self.scalar_activation_scale(&tensor.name)?;
                 let weight = self.tensor(weight_name)?;
-                if !matches!(weight.data, MarianTensorData::Intgemm8 { .. }) {
+                if !weight.is_intgemm8() {
                     return Err(Q8Error::tensor(
                         &tensor.name,
                         format!("activation scale refers to non-Q8 tensor {weight_name}"),
@@ -454,7 +516,7 @@ impl MarianBinaryModel {
                 continue;
             }
 
-            if !matches!(tensor.data, MarianTensorData::Intgemm8 { .. }) {
+            if !tensor.is_intgemm8() {
                 continue;
             }
             if tensor.shape.len() != 2 {

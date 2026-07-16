@@ -642,6 +642,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "marian-worker-wasm"
+version = "0.7.0"
+dependencies = [
+ "marian-core",
+ "marian-cpu",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -143,11 +143,16 @@ impl Q8Linear {
             Q8ExecutionPath::Rten
         };
 
+        #[cfg(target_arch = "wasm32")]
+        let retained_weights = Vec::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let retained_weights = weights_output_input;
+
         Ok(Self {
             name,
             input_dim,
             output_dim,
-            weights: weights_output_input,
+            weights: retained_weights,
             activation_quant_mult,
             weight_quant_mult,
             bias,
@@ -285,6 +290,7 @@ impl Q8Linear {
         zero_points.clear();
         zero_points.resize(rows, ACTIVATION_ZERO_POINT);
         output.fill(0);
+        #[cfg(not(target_arch = "wasm32"))]
         let result = if rows == 1 {
             // rten has a specialized GEMV path for an unpacked B. Keep the
             // original Q8 bytes alongside the reusable packed matrix for it.
@@ -316,6 +322,19 @@ impl Q8Linear {
                 None,
             )
         };
+        #[cfg(target_arch = "wasm32")]
+        let result = self.executor.gemm(
+            output,
+            GemmInputA::Unpacked(lhs),
+            GemmInputB::Packed(&self.packed_weights),
+            1.0,
+            0,
+            None,
+            Some(QuantParams {
+                zero_point: zero_points,
+            }),
+            None,
+        );
         result.map_err(|error| Q8Error::Gemm(format!("{}: {error}", self.name)))?;
         Ok(())
     }

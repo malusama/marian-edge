@@ -20,6 +20,12 @@ impl Tokenizer {
         Ok(Self { processor })
     }
 
+    /// Loads a serialized SentencePiece model from memory.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, TokenizerError> {
+        let processor = SentencePieceProcessor::from_bytes(bytes).map_err(TokenizerError::Bytes)?;
+        Ok(Self { processor })
+    }
+
     /// Returns the number of pieces in the model vocabulary.
     pub fn len(&self) -> usize {
         self.processor.piece_size()
@@ -49,6 +55,8 @@ pub enum TokenizerError {
         #[source]
         source: sentencepiece_rust::Error,
     },
+    #[error("failed to parse SentencePiece model bytes: {0}")]
+    Bytes(#[source] sentencepiece_rust::Error),
     #[error("SentencePiece encoding failed: {0}")]
     Encode(#[source] sentencepiece_rust::Error),
     #[error("SentencePiece decoding failed: {0}")]

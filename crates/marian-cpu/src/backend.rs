@@ -503,6 +503,7 @@ pub struct Q8CpuBackend {
 
 impl Q8CpuBackend {
     /// Load a checksum-verified `precision: "q8"` model directory.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self, BackendError> {
         let model_dir = std::fs::canonicalize(model_dir.as_ref()).map_err(|error| {
             BackendError::Model(format!(
@@ -529,6 +530,112 @@ impl Q8CpuBackend {
         Self::load_verified(model_dir, manifest, Box::new(source), Box::new(target))
     }
 
+    /// Loads a complete Q8 backend from byte payloads, for sandboxed runtimes
+    /// such as Cloudflare Workers where filesystem access is unavailable.
+    pub fn from_bytes(
+        manifest_bytes: &[u8],
+        weights_bytes: &[u8],
+        source_vocab_bytes: &[u8],
+        target_vocab_bytes: &[u8],
+        shortlist_bytes: Option<&[u8]>,
+    ) -> Result<Self, BackendError> {
+        let manifest = ModelManifest::from_bytes(manifest_bytes)?;
+        manifest.verify_runtime_bytes(
+            weights_bytes,
+            source_vocab_bytes,
+            target_vocab_bytes,
+            shortlist_bytes,
+        )?;
+        let source =
+            marian_tokenizer::Tokenizer::from_bytes(source_vocab_bytes).map_err(|error| {
+                BackendError::Model(format!("failed to load source tokenizer: {error}"))
+            })?;
+        let target =
+            marian_tokenizer::Tokenizer::from_bytes(target_vocab_bytes).map_err(|error| {
+                BackendError::Model(format!("failed to load target tokenizer: {error}"))
+            })?;
+        Self::from_verified_bytes(
+            manifest,
+            weights_bytes,
+            shortlist_bytes,
+            Box::new(source),
+            Box::new(target),
+        )
+    }
+
+    /// Owned-buffer variant used by Wasm hosts so the raw model allocation can
+    /// be released before architecture-specific packing starts.
+    pub fn from_owned_bytes(
+        manifest_bytes: Vec<u8>,
+        weights_bytes: Vec<u8>,
+        source_vocab_bytes: Vec<u8>,
+        target_vocab_bytes: Vec<u8>,
+        shortlist_bytes: Option<Vec<u8>>,
+    ) -> Result<Self, BackendError> {
+        let manifest = ModelManifest::from_bytes(&manifest_bytes)?;
+        drop(manifest_bytes);
+        manifest.verify_runtime_bytes(
+            &weights_bytes,
+            &source_vocab_bytes,
+            &target_vocab_bytes,
+            shortlist_bytes.as_deref(),
+        )?;
+        Self::from_preverified_parts(
+            manifest,
+            weights_bytes,
+            source_vocab_bytes,
+            target_vocab_bytes,
+            shortlist_bytes,
+        )
+    }
+
+    /// Loads caller-verified payloads. The host must authenticate every byte
+    /// against the manifest before using this entry point.
+    pub fn from_preverified_owned_bytes(
+        manifest_bytes: Vec<u8>,
+        weights_bytes: Vec<u8>,
+        source_vocab_bytes: Vec<u8>,
+        target_vocab_bytes: Vec<u8>,
+        shortlist_bytes: Option<Vec<u8>>,
+    ) -> Result<Self, BackendError> {
+        let manifest = ModelManifest::from_bytes(&manifest_bytes)?;
+        drop(manifest_bytes);
+        Self::from_preverified_parts(
+            manifest,
+            weights_bytes,
+            source_vocab_bytes,
+            target_vocab_bytes,
+            shortlist_bytes,
+        )
+    }
+
+    fn from_preverified_parts(
+        manifest: ModelManifest,
+        weights_bytes: Vec<u8>,
+        source_vocab_bytes: Vec<u8>,
+        target_vocab_bytes: Vec<u8>,
+        shortlist_bytes: Option<Vec<u8>>,
+    ) -> Result<Self, BackendError> {
+        let source =
+            marian_tokenizer::Tokenizer::from_bytes(&source_vocab_bytes).map_err(|error| {
+                BackendError::Model(format!("failed to load source tokenizer: {error}"))
+            })?;
+        drop(source_vocab_bytes);
+        let target =
+            marian_tokenizer::Tokenizer::from_bytes(&target_vocab_bytes).map_err(|error| {
+                BackendError::Model(format!("failed to load target tokenizer: {error}"))
+            })?;
+        drop(target_vocab_bytes);
+        Self::from_verified_owned_bytes(
+            manifest,
+            weights_bytes,
+            shortlist_bytes,
+            Box::new(source),
+            Box::new(target),
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load_with_tokenizers<S, T>(
         model_dir: impl AsRef<Path>,
         source: S,
@@ -549,6 +656,7 @@ impl Q8CpuBackend {
         Self::load_verified(model_dir, manifest, Box::new(source), Box::new(target))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn load_verified(
         model_dir: impl AsRef<Path>,
         manifest: ModelManifest,
@@ -578,10 +686,94 @@ impl Q8CpuBackend {
         let shortlist = manifest.shortlist.as_ref().map(|path| model_dir.join(path));
         let engine = Q8CpuEngine::load(&weights, shortlist.as_deref(), &manifest.architecture)
             .map_err(BackendError::Model)?;
+        #[cfg(not(target_arch = "wasm32"))]
         engine
             .warmup()
             .map_err(|error| BackendError::Inference(format!("Q8 CPU warmup failed: {error}")))?;
 
+        Ok(Self {
+            engine,
+            source,
+            target,
+            source_lang: manifest.source_lang,
+            target_lang: manifest.target_lang,
+            model_id: manifest.model_id,
+            eos_id: manifest.architecture.eos_id,
+        })
+    }
+
+    fn from_verified_bytes(
+        manifest: ModelManifest,
+        weights: &[u8],
+        shortlist: Option<&[u8]>,
+        source: Box<dyn TextTokenizer>,
+        target: Box<dyn TextTokenizer>,
+    ) -> Result<Self, BackendError> {
+        if manifest.precision != "q8" {
+            return Err(BackendError::Model(format!(
+                "Q8 CPU backend requires precision q8, got {}",
+                manifest.precision
+            )));
+        }
+        if source.vocabulary_size() != manifest.architecture.source_vocab_size
+            || target.vocabulary_size() != manifest.architecture.target_vocab_size
+        {
+            return Err(BackendError::Model(format!(
+                "tokenizer vocabulary sizes {} / {} do not match model {} / {}",
+                source.vocabulary_size(),
+                target.vocabulary_size(),
+                manifest.architecture.source_vocab_size,
+                manifest.architecture.target_vocab_size
+            )));
+        }
+        let engine = Q8CpuEngine::from_bytes(weights, shortlist, &manifest.architecture)
+            .map_err(BackendError::Model)?;
+        engine
+            .warmup()
+            .map_err(|error| BackendError::Inference(format!("Q8 CPU warmup failed: {error}")))?;
+        Ok(Self {
+            engine,
+            source,
+            target,
+            source_lang: manifest.source_lang,
+            target_lang: manifest.target_lang,
+            model_id: manifest.model_id,
+            eos_id: manifest.architecture.eos_id,
+        })
+    }
+
+    fn from_verified_owned_bytes(
+        manifest: ModelManifest,
+        weights: Vec<u8>,
+        shortlist: Option<Vec<u8>>,
+        source: Box<dyn TextTokenizer>,
+        target: Box<dyn TextTokenizer>,
+    ) -> Result<Self, BackendError> {
+        if manifest.precision != "q8" {
+            return Err(BackendError::Model(format!(
+                "Q8 CPU backend requires precision q8, got {}",
+                manifest.precision
+            )));
+        }
+        if source.vocabulary_size() != manifest.architecture.source_vocab_size
+            || target.vocabulary_size() != manifest.architecture.target_vocab_size
+        {
+            return Err(BackendError::Model(format!(
+                "tokenizer vocabulary sizes {} / {} do not match model {} / {}",
+                source.vocabulary_size(),
+                target.vocabulary_size(),
+                manifest.architecture.source_vocab_size,
+                manifest.architecture.target_vocab_size
+            )));
+        }
+        let engine =
+            Q8CpuEngine::from_owned_bytes(weights, shortlist.as_deref(), &manifest.architecture)
+                .map_err(BackendError::Model)?;
+        drop(shortlist);
+        #[cfg(not(target_arch = "wasm32"))]
+        engine
+            .warmup()
+            .map_err(|error| BackendError::Inference(format!("Q8 CPU warmup failed: {error}")))?;
         Ok(Self {
             engine,
             source,
@@ -638,6 +830,7 @@ pub enum CpuModelBackend {
 }
 
 impl CpuModelBackend {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self, BackendError> {
         let manifest = ModelManifest::load(model_dir.as_ref())?;
         match manifest.precision.as_str() {
