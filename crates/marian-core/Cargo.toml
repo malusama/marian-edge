@@ -9,9 +9,11 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
-futures-util.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-util.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

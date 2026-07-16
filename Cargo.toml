@@ -6,6 +6,7 @@ members = [
     "crates/marian-metal",
     "crates/marian-server",
     "crates/marian-tokenizer",
+    "crates/marian-worker-wasm",
 ]
 resolver = "2"
 

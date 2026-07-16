@@ -1,4 +1,7 @@
-use std::{cell::RefCell, collections::HashSet, path::Path, time::Instant};
+use std::{cell::RefCell, collections::HashSet, path::Path};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 use marian_model::{Architecture, LexicalShortlist, MAXIMUM_POSITION, sinusoidal_positions};
 
@@ -25,22 +28,20 @@ struct Q8Embedding {
 }
 
 impl Q8Embedding {
-    fn load(
-        model: &MarianBinaryModel,
+    fn take(
+        model: &mut MarianBinaryModel,
         name: &str,
         rows: usize,
         cols: usize,
     ) -> Result<Self, String> {
-        let tensor = model.tensor(name).map_err(q8_string)?;
-        if tensor.shape() != [rows, cols] {
+        let (values, quant_mult, shape) = model.take_intgemm8(name).map_err(q8_string)?;
+        if shape != [rows, cols] {
             return Err(format!(
-                "Q8 embedding {name} has shape {:?}; expected [{rows}, {cols}]",
-                tensor.shape()
+                "Q8 embedding {name} has shape {shape:?}; expected [{rows}, {cols}]"
             ));
         }
-        let (values, quant_mult) = tensor.as_intgemm8().map_err(q8_string)?;
         Ok(Self {
-            values: values.to_vec(),
+            values,
             quant_mult,
             rows,
             cols,
@@ -155,6 +156,7 @@ pub struct Q8MemoryReport {
 }
 
 impl Q8CpuEngine {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn load(
         weights_path: impl AsRef<Path>,
         shortlist_path: Option<&Path>,
@@ -162,15 +164,64 @@ impl Q8CpuEngine {
     ) -> Result<Self, String> {
         architecture.validate_supported()?;
         let binary = MarianBinaryModel::open(weights_path).map_err(q8_string)?;
+        Self::from_model(
+            binary,
+            shortlist_path.map(ShortlistSource::Path),
+            architecture,
+        )
+    }
+
+    /// Loads a Q8 model and lexical shortlist from in-memory payloads.
+    pub fn from_bytes(
+        weights: &[u8],
+        shortlist: Option<&[u8]>,
+        architecture: &Architecture,
+    ) -> Result<Self, String> {
+        let binary = MarianBinaryModel::parse(weights).map_err(q8_string)?;
+        Self::from_model(binary, shortlist.map(ShortlistSource::Bytes), architecture)
+    }
+
+    /// Loads from an owned model buffer and releases it before weight packing.
+    pub fn from_owned_bytes(
+        weights: Vec<u8>,
+        shortlist: Option<&[u8]>,
+        architecture: &Architecture,
+    ) -> Result<Self, String> {
+        let binary = MarianBinaryModel::parse(&weights).map_err(q8_string)?;
+        drop(weights);
+        Self::from_model(binary, shortlist.map(ShortlistSource::Bytes), architecture)
+    }
+
+    fn from_model(
+        binary: MarianBinaryModel,
+        shortlist_source: Option<ShortlistSource<'_>>,
+        architecture: &Architecture,
+    ) -> Result<Self, String> {
         validate_tensor_schema(&binary, architecture)?;
+        #[cfg(not(target_arch = "wasm32"))]
         let packing_started = Instant::now();
-        let model = Q8ModelWeights::load(&binary, architecture)?;
+        let model = Q8ModelWeights::load_owned(binary, architecture)?;
+        #[cfg(not(target_arch = "wasm32"))]
         let packed_weight_build_ms = packing_started.elapsed().as_secs_f64() * 1_000.0;
-        let shortlist = LexicalShortlist::load(
-            shortlist_path,
-            architecture.source_vocab_size,
-            architecture.target_vocab_size,
-        )?;
+        #[cfg(target_arch = "wasm32")]
+        let packed_weight_build_ms = 0.0;
+        let shortlist = match shortlist_source {
+            Some(ShortlistSource::Path(path)) => LexicalShortlist::load(
+                Some(path),
+                architecture.source_vocab_size,
+                architecture.target_vocab_size,
+            )?,
+            Some(ShortlistSource::Bytes(bytes)) => LexicalShortlist::from_bytes(
+                Some(bytes),
+                architecture.source_vocab_size,
+                architecture.target_vocab_size,
+            )?,
+            None => LexicalShortlist::from_bytes(
+                None,
+                architecture.source_vocab_size,
+                architecture.target_vocab_size,
+            )?,
+        };
         Ok(Self {
             model,
             positions: sinusoidal_positions(architecture.model_dim)?,
@@ -648,6 +699,11 @@ impl Q8CpuEngine {
     }
 }
 
+enum ShortlistSource<'a> {
+    Path(&'a Path),
+    Bytes(&'a [u8]),
+}
+
 impl Q8ModelWeights {
     fn for_each_linear(&self, mut visit: impl FnMut(&Q8Linear)) {
         for layer in &self.encoder {
@@ -678,34 +734,45 @@ impl Q8ModelWeights {
         }
     }
 
-    fn load(model: &MarianBinaryModel, architecture: &Architecture) -> Result<Self, String> {
+    fn load_owned(
+        mut model: MarianBinaryModel,
+        architecture: &Architecture,
+    ) -> Result<Self, String> {
         let dim = architecture.model_dim;
         let ffn_dim = architecture.ffn_dim;
-        let encoder_embedding =
-            Q8Embedding::load(model, "encoder_Wemb", architecture.source_vocab_size, dim)?;
-        let decoder_embedding =
-            Q8Embedding::load(model, "decoder_Wemb", architecture.target_vocab_size, dim)?;
         let decoder_output_activation_mult = model
             .activation_scale_for("decoder_Wemb")
             .map_err(q8_string)?;
         let output_bias = take_float_vector(
-            model,
+            &model,
             "decoder_ff_logit_out_b",
             architecture.target_vocab_size,
+        )?;
+        let encoder_embedding = Q8Embedding::take(
+            &mut model,
+            "encoder_Wemb",
+            architecture.source_vocab_size,
+            dim,
+        )?;
+        let decoder_embedding = Q8Embedding::take(
+            &mut model,
+            "decoder_Wemb",
+            architecture.target_vocab_size,
+            dim,
         )?;
         let mut encoder = Vec::with_capacity(architecture.encoder_layers);
         for layer in 1..=architecture.encoder_layers {
             encoder.push(Q8EncoderLayer {
-                attention: load_attention(model, &format!("encoder_l{layer}_self"), dim)?,
-                ffn: load_ffn(model, &format!("encoder_l{layer}_ffn"), dim, ffn_dim)?,
+                attention: load_attention(&mut model, &format!("encoder_l{layer}_self"), dim)?,
+                ffn: load_ffn(&mut model, &format!("encoder_l{layer}_ffn"), dim, ffn_dim)?,
             });
         }
         let mut decoder = Vec::with_capacity(architecture.decoder_layers);
         for layer in 1..=architecture.decoder_layers {
             decoder.push(Q8DecoderLayer {
-                ssru: load_ssru(model, &format!("decoder_l{layer}_rnn"), dim)?,
-                context: load_attention(model, &format!("decoder_l{layer}_context"), dim)?,
-                ffn: load_ffn(model, &format!("decoder_l{layer}_ffn"), dim, ffn_dim)?,
+                ssru: load_ssru(&mut model, &format!("decoder_l{layer}_rnn"), dim)?,
+                context: load_attention(&mut model, &format!("decoder_l{layer}_context"), dim)?,
+                ffn: load_ffn(&mut model, &format!("decoder_l{layer}_ffn"), dim, ffn_dim)?,
             });
         }
         Ok(Self {
@@ -720,7 +787,7 @@ impl Q8ModelWeights {
 }
 
 fn load_attention(
-    model: &MarianBinaryModel,
+    model: &mut MarianBinaryModel,
     prefix: &str,
     dim: usize,
 ) -> Result<Q8AttentionWeights, String> {
@@ -759,7 +826,7 @@ fn load_attention(
 }
 
 fn load_ffn(
-    model: &MarianBinaryModel,
+    model: &mut MarianBinaryModel,
     prefix: &str,
     dim: usize,
     ffn_dim: usize,
@@ -784,7 +851,11 @@ fn load_ffn(
     })
 }
 
-fn load_ssru(model: &MarianBinaryModel, prefix: &str, dim: usize) -> Result<Q8SsruWeights, String> {
+fn load_ssru(
+    model: &mut MarianBinaryModel,
+    prefix: &str,
+    dim: usize,
+) -> Result<Q8SsruWeights, String> {
     Ok(Q8SsruWeights {
         w: dense(model, &format!("{prefix}_W"), None, dim, dim)?,
         wf: dense(
@@ -800,14 +871,14 @@ fn load_ssru(model: &MarianBinaryModel, prefix: &str, dim: usize) -> Result<Q8Ss
 }
 
 fn dense(
-    model: &MarianBinaryModel,
+    model: &mut MarianBinaryModel,
     weight: &str,
     bias: Option<&str>,
     input_dim: usize,
     output_dim: usize,
 ) -> Result<Q8Linear, String> {
     model
-        .dense_linear(weight, bias, input_dim, output_dim)
+        .take_dense_linear(weight, bias, input_dim, output_dim)
         .map_err(q8_string)
 }
 

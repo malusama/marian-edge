@@ -18,13 +18,7 @@ impl LexicalShortlist {
         target_vocab: usize,
     ) -> Result<Self, String> {
         let Some(path) = path else {
-            return Ok(Self {
-                source_vocab,
-                target_vocab,
-                first_num: 0,
-                offsets: Vec::new(),
-                targets: Vec::new(),
-            });
+            return Self::from_bytes(None, source_vocab, target_vocab);
         };
         let offset_count_expected = source_vocab
             .checked_add(1)
@@ -55,6 +49,40 @@ impl LexicalShortlist {
                 path.display()
             )
         })?;
+        Self::from_bytes(Some(&bytes), source_vocab, target_vocab)
+    }
+
+    /// Parses a Marian lexical shortlist from an in-memory payload.
+    pub fn from_bytes(
+        bytes: Option<&[u8]>,
+        source_vocab: usize,
+        target_vocab: usize,
+    ) -> Result<Self, String> {
+        let Some(bytes) = bytes else {
+            return Ok(Self {
+                source_vocab,
+                target_vocab,
+                first_num: 0,
+                offsets: Vec::new(),
+                targets: Vec::new(),
+            });
+        };
+        let offset_count_expected = source_vocab
+            .checked_add(1)
+            .ok_or_else(|| "source vocabulary is too large".to_string())?;
+        let maximum_offset_bytes = offset_count_expected
+            .checked_mul(8)
+            .ok_or_else(|| "shortlist offset table size overflows usize".to_string())?;
+        let maximum_bytes = 48usize
+            .checked_add(maximum_offset_bytes)
+            .and_then(|value| value.checked_add(MAX_TARGET_ENTRIES * 4))
+            .ok_or_else(|| "shortlist size bound overflows usize".to_string())?;
+        if bytes.len() > maximum_bytes {
+            return Err(format!(
+                "lexical shortlist has {} bytes; maximum is {maximum_bytes}",
+                bytes.len()
+            ));
+        }
         if bytes.len() < 48 {
             return Err("truncated lexical shortlist header".into());
         }

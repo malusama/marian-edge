@@ -1,0 +1,18 @@
+[package]
+name = "marian-worker-wasm"
+description = "Raw Wasm ABI for Marian Q8 inference in Cloudflare Workers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+marian-core.workspace = true
+marian-cpu.workspace = true
+serde.workspace = true
+serde_json.workspace = true
