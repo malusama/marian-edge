@@ -881,8 +881,6 @@ dependencies = [
 [[package]]
 name = "rten-gemm"
 version = "0.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99b07a25cfa3935b3d432fb26d15a1a80bbd5cb3e542d8427f8f2321e89b6aa6"
 dependencies = [
  "rayon",
  "rten-base",

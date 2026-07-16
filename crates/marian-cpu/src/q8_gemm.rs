@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{fmt, mem::size_of};
 
 use rten_gemm::{GemmExecutor, GemmInputA, GemmInputB, PackedBMatrix, QuantParams};
@@ -162,6 +163,149 @@ impl Q8Linear {
         })
     }
 
+    /// Rebuild a linear operator from a buffer produced by this exact
+    /// `rten-gemm` kernel. This is used by the Worker artifact loader to avoid
+    /// materializing canonical dense weights during cold start.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_packed_parts(
+        name: impl Into<String>,
+        input_dim: usize,
+        output_dim: usize,
+        activation_quant_mult: f32,
+        weight_quant_mult: f32,
+        bias: Option<Vec<f32>>,
+        packed_kernel_name: &str,
+        packed_words: Vec<u32>,
+    ) -> Result<Self, Q8Error> {
+        let name = name.into();
+        if input_dim == 0 || output_dim == 0 {
+            return Err(Q8Error::tensor(
+                &name,
+                format!("linear dimensions must be positive, got {input_dim} x {output_dim}"),
+            ));
+        }
+        validate_quant_mult(&name, "activation", activation_quant_mult)?;
+        validate_quant_mult(&name, "weight", weight_quant_mult)?;
+        let combined = activation_quant_mult * weight_quant_mult;
+        if !combined.is_finite() || combined <= 0.0 {
+            return Err(Q8Error::tensor(
+                &name,
+                "activation and weight quantization multipliers have an invalid product",
+            ));
+        }
+        if let Some(bias) = &bias {
+            if bias.len() != output_dim {
+                return Err(Q8Error::tensor(
+                    &name,
+                    format!(
+                        "bias has {} values, expected output dimension {output_dim}",
+                        bias.len()
+                    ),
+                ));
+            }
+            if bias.iter().any(|value| !value.is_finite()) {
+                return Err(Q8Error::tensor(&name, "bias contains a non-finite value"));
+            }
+        }
+
+        let executor = GemmExecutor::<u8, i8, i32>::new();
+        let packed_weights = executor
+            .restore_packed_b(packed_words, input_dim, output_dim, packed_kernel_name)
+            .map_err(|error| {
+                Q8Error::tensor(
+                    &name,
+                    format!("invalid packed weights for {packed_kernel_name}: {error}"),
+                )
+            })?;
+        Ok(Self {
+            name,
+            input_dim,
+            output_dim,
+            weights: Vec::new(),
+            activation_quant_mult,
+            weight_quant_mult,
+            bias,
+            executor,
+            packed_weights,
+            execution_path: Q8ExecutionPath::Rten,
+        })
+    }
+
+    /// Zero-copy variant of [`Self::from_packed_parts`] for a model-wide
+    /// packed buffer shared by all dense operators.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_shared_packed_parts(
+        name: impl Into<String>,
+        input_dim: usize,
+        output_dim: usize,
+        activation_quant_mult: f32,
+        weight_quant_mult: f32,
+        bias: Option<Vec<f32>>,
+        packed_kernel_name: &str,
+        packed_words: Arc<Vec<u32>>,
+        packed_start: usize,
+        packed_len: usize,
+    ) -> Result<Self, Q8Error> {
+        let name = name.into();
+        if input_dim == 0 || output_dim == 0 {
+            return Err(Q8Error::tensor(
+                &name,
+                format!("linear dimensions must be positive, got {input_dim} x {output_dim}"),
+            ));
+        }
+        validate_quant_mult(&name, "activation", activation_quant_mult)?;
+        validate_quant_mult(&name, "weight", weight_quant_mult)?;
+        let combined = activation_quant_mult * weight_quant_mult;
+        if !combined.is_finite() || combined <= 0.0 {
+            return Err(Q8Error::tensor(
+                &name,
+                "activation and weight quantization multipliers have an invalid product",
+            ));
+        }
+        if let Some(bias) = &bias {
+            if bias.len() != output_dim {
+                return Err(Q8Error::tensor(
+                    &name,
+                    format!(
+                        "bias has {} values, expected output dimension {output_dim}",
+                        bias.len()
+                    ),
+                ));
+            }
+            if bias.iter().any(|value| !value.is_finite()) {
+                return Err(Q8Error::tensor(&name, "bias contains a non-finite value"));
+            }
+        }
+        let executor = GemmExecutor::<u8, i8, i32>::new();
+        let packed_weights = executor
+            .restore_shared_packed_b(
+                packed_words,
+                packed_start,
+                packed_len,
+                input_dim,
+                output_dim,
+                packed_kernel_name,
+            )
+            .map_err(|error| {
+                Q8Error::tensor(
+                    &name,
+                    format!("invalid shared packed weights for {packed_kernel_name}: {error}"),
+                )
+            })?;
+        Ok(Self {
+            name,
+            input_dim,
+            output_dim,
+            weights: Vec::new(),
+            activation_quant_mult,
+            weight_quant_mult,
+            bias,
+            executor,
+            packed_weights,
+            execution_path: Q8ExecutionPath::Rten,
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -192,6 +336,16 @@ impl Q8Linear {
 
     pub fn weights(&self) -> &[i8] {
         &self.weights
+    }
+
+    pub fn bias(&self) -> Option<&[f32]> {
+        self.bias.as_deref()
+    }
+
+    /// Copies the architecture-specific packed buffer for offline artifact
+    /// generation. Runtime inference never calls this method.
+    pub fn packed_words(&self) -> Vec<u32> {
+        self.packed_weights.clone().into_vec()
     }
 
     /// Return canonical and architecture-packed weight storage in bytes.
@@ -291,7 +445,7 @@ impl Q8Linear {
         zero_points.resize(rows, ACTIVATION_ZERO_POINT);
         output.fill(0);
         #[cfg(not(target_arch = "wasm32"))]
-        let result = if rows == 1 {
+        let result = if rows == 1 && !self.weights.is_empty() {
             // rten has a specialized GEMV path for an unpacked B. Keep the
             // original Q8 bytes alongside the reusable packed matrix for it.
             let weights =
@@ -404,6 +558,8 @@ fn validate_quant_mult(name: &str, kind: &str, value: f32) -> Result<(), Q8Error
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{Q8ExecutionPath, Q8Linear, Q8LinearScratch, quantize_symmetric_u8};
 
     #[test]
@@ -490,6 +646,70 @@ mod tests {
         assert!(linear.run(&[1.0], 1).is_err());
         assert!(linear.run(&[1.0], 0).is_err());
         assert!(linear.run(&[], 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shared_packed_restore_is_shape_and_kernel_checked() {
+        let original = Q8Linear::new(
+            "shared",
+            4,
+            2,
+            vec![2, -3, 5, 7, -11, 13, -17, 19],
+            4.0,
+            8.0,
+            None,
+        )
+        .unwrap();
+        let kernel = original.kernel_name().to_owned();
+        let words = Arc::new(original.packed_words());
+        let restored = Q8Linear::from_shared_packed_parts(
+            "shared",
+            4,
+            2,
+            4.0,
+            8.0,
+            None,
+            &kernel,
+            Arc::clone(&words),
+            0,
+            words.len(),
+        )
+        .unwrap();
+        let input = [0.0, 0.25, -0.5, 1.0];
+        assert_eq!(
+            restored.run(&input, 1).unwrap(),
+            original.run(&input, 1).unwrap()
+        );
+        assert!(
+            Q8Linear::from_shared_packed_parts(
+                "bad-kernel",
+                4,
+                2,
+                4.0,
+                8.0,
+                None,
+                "not-the-selected-kernel",
+                Arc::clone(&words),
+                0,
+                words.len(),
+            )
+            .is_err()
+        );
+        assert!(
+            Q8Linear::from_shared_packed_parts(
+                "bad-size",
+                4,
+                2,
+                4.0,
+                8.0,
+                None,
+                &kernel,
+                Arc::clone(&words),
+                0,
+                words.len() - 1,
+            )
+            .is_err()
+        );
     }
 
     #[test]

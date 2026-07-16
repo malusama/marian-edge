@@ -80,3 +80,6 @@ codegen-units = 1
 # panic into an unavailable worker instead of aborting the whole service.
 panic = "unwind"
 strip = "symbols"
+
+[patch.crates-io]
+rten-gemm = { path = "vendor/rten-gemm" }
