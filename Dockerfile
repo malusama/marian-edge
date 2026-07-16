@@ -7,6 +7,7 @@ ARG VCS_REF=unknown
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY vendor ./vendor
 RUN MARIAN_EDGE_BUILD_GIT_SHA="$VCS_REF" \
     cargo build --locked --release -p marian-server --features cpu && \
     install -D -m 0755 target/release/marian-edge-server /out/bin/marian-edge-server
