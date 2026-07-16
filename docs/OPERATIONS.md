@@ -81,39 +81,31 @@ Repository scripts such as `scripts/install-macos.sh` are contributor entry
 points when working from a source checkout. Installed users should use
 `marian-edgectl`.
 
-### Production profile and controlled A/B
+### Metal settings and local A/B runs
 
-The v0.6 M1 qualification covers maximum batch 16, a 750 us window, about 32
-concurrent short requests, FP32, and Flash `auto`. The resolved M1 profile is
-`width=9`, `decode-rows=54`, `decode-steps=6`, `select-threads=256`, and
-`custom-gemm-max=0`; `/info` reports the active values. A historical v0.4
-mixed-f16 sweep found no benefit at concurrency 64, but that point is not a
-current v0.6 FP32 qualification result.
+The installed LaunchAgent does not inherit variables from an interactive
+shell. The settings below apply to a separate foreground process; they do not
+change an already installed service.
 
-The installed LaunchAgent does not inherit environment variables exported in
-an interactive shell. The Metal variables below are for a separate foreground
-source-build or release-binary A/B process. They do not reconfigure the
-installed service:
-
-| Environment variable | M1 production value | Valid values / purpose |
+| Environment variable | Default | Values |
 |---|---:|---|
-| `MARIAN_EDGE_METAL_PRECISION` | `fp32` | `fp32` or explicit `mixed-f16` storage |
-| `MARIAN_EDGE_METAL_PROFILE` | `auto` -> `m1` | `auto`, `m1`, `m2`, `m3`, `m4`, `generic` |
+| `MARIAN_EDGE_METAL_PRECISION` | `fp32` | `fp32`, `mixed-f16` |
+| `MARIAN_EDGE_METAL_PROFILE` | `auto` | `auto`, `m1`, `m2`, `m3`, `m4`, `generic` |
 | `MARIAN_EDGE_METAL_ATTENTION` | `auto` | `auto`, `classic`, `flash` |
-| `MARIAN_EDGE_METAL_FLASH_THRESHOLD` | `1` | positive self-attention sequence threshold, maximum 4096 |
-| `MARIAN_EDGE_METAL_FLASH_QUERY_TILE` | `4` | `1`, `2`, or `4` |
-| `MARIAN_EDGE_METAL_DUPLICATE_BATCH_WIDTH` | `9` | maximum physical occupancy width inside one dynamic batch |
-| `MARIAN_EDGE_METAL_DECODE_ROW_BUDGET` | `54` | positive rows multiplied by steps per submission |
-| `MARIAN_EDGE_METAL_DECODE_MAX_STEPS` | `6` | `1` through `8` |
-| `MARIAN_EDGE_METAL_DECODE_SELECTION_THREADS` | `256` | `128`, `256`, or `512` |
-| `MARIAN_EDGE_METAL_CUSTOM_GEMM_MAX_ROWS` | `0` | `0` disables custom FP32 GEMM; positive values set its row ceiling |
+| `MARIAN_EDGE_METAL_FLASH_THRESHOLD` | `1` | sequence threshold, at most 4096 |
+| `MARIAN_EDGE_METAL_FLASH_QUERY_TILE` | profile value | `1`, `2`, `4` |
+| `MARIAN_EDGE_METAL_DUPLICATE_BATCH_WIDTH` | profile value | physical row target for duplicate requests |
+| `MARIAN_EDGE_METAL_DECODE_ROW_BUDGET` | profile value | rows multiplied by steps per submission |
+| `MARIAN_EDGE_METAL_DECODE_MAX_STEPS` | profile value | `1` through `8` |
+| `MARIAN_EDGE_METAL_DECODE_SELECTION_THREADS` | profile value | `128`, `256`, `512` |
+| `MARIAN_EDGE_METAL_CUSTOM_GEMM_MAX_ROWS` | profile value | `0` disables the custom FP32 GEMM path |
 
-The product-level `MARIAN_EDGE_METAL_*` names above are canonical.
-`MARIAN_EDGE_METAL_*` spellings are accepted aliases for embedding use; if both
-forms are set to different values, startup fails rather than choosing one.
+`MARIAN_EDGE_METAL_*` is the current namespace. The old
+`MARIAN_MLX_METAL_*` names remain as aliases; startup rejects conflicting
+values.
 
-For example, leave the LaunchAgent on its saved port and run the foreground
-candidate on 3101:
+Leave the installed service on its saved port and run an A/B candidate on a
+different port:
 
 ```sh
 MARIAN_EDGE_METAL_ATTENTION=classic \
@@ -123,11 +115,9 @@ MARIAN_EDGE_METAL_ATTENTION=classic \
 curl -fsS http://127.0.0.1:3101/info
 ```
 
-Duplicate width is not a result cache: core coalesces logical duplicates and
-the Metal backend may rematerialize bounded physical rows for occupancy.
-Re-sweep every device knob on a different Apple GPU instead of assuming the M1
-knee applies unchanged. M2-M4 defaults are conservative, not qualified
-performance claims.
+The M1 defaults and their measurements are in
+[BENCHMARKS.md](BENCHMARKS.md). Re-run the sweep before changing another GPU
+family's profile.
 
 ## Runtime configuration
 
@@ -160,7 +150,8 @@ docker compose pull
 docker compose up -d
 docker compose ps
 docker compose logs -f
-curl -fsS http://127.0.0.1:3000/info
+SERVICE_ORIGIN=http://127.0.0.1:3000
+curl -fsS "$SERVICE_ORIGIN/info"
 docker compose down
 ```
 
@@ -168,9 +159,10 @@ Custom host port:
 
 ```sh
 MARIAN_EDGE_HOST_PORT=3100 docker compose up -d
-curl -fsS http://127.0.0.1:3100/readyz
-curl -fsS http://127.0.0.1:3100/info
-# Immersive Translate: http://127.0.0.1:3100/imme
+SERVICE_ORIGIN=http://127.0.0.1:3100
+curl -fsS "$SERVICE_ORIGIN/readyz"
+curl -fsS "$SERVICE_ORIGIN/info"
+# Immersive Translate: $SERVICE_ORIGIN/imme
 ```
 
 For a reproducible rollback, pin the immutable versioned image. Repeat the same
@@ -211,7 +203,7 @@ docker stats
 Exact scaling depends on text length, batch shape, architecture, precision,
 and model workspace; do not apply sizing numbers from the retired CPU runtime.
 
-## Health and error contract
+## Health checks and errors
 
 | Endpoint | Success means | Suitable for |
 |---|---|---|
@@ -240,10 +232,9 @@ CPU and Metal both segment long paragraphs through the shared tokenizer-aware
 policy and preserve separator order. If a long request times out, inspect total
 input size and host load; per-segment shape and work limits still apply.
 
-Startup fails closed for missing or invalid model artifacts, checksum or
-precision/architecture mismatch, SentencePiece vocabulary errors, Q8 tensor
-validation errors, an unavailable Metal device, MSL compilation failure, or
-compute-pipeline creation failure.
+Startup stops on invalid model files, checksum or architecture mismatches,
+SentencePiece errors, Q8 validation errors, an unavailable Metal device, or a
+Metal compilation/pipeline error.
 
 Keep host publication on loopback unless a separate authenticated TLS proxy is
 in front of it. The application itself is not an internet-facing gateway.

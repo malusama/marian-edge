@@ -5,6 +5,21 @@ Versioning after the first stable release.
 
 ## [Unreleased]
 
+### Changed
+
+- Shortened the READMEs and optimization roadmap, moving implementation and
+  benchmark detail to their dedicated documents.
+- Reworked the Immersive Translate instructions around one `SERVICE_ORIGIN` so
+  health checks and `/imme` cannot silently switch between ports 3000 and 3100.
+- Added a beam 1/2/4 reference comparison; beam 1 remains the latency default
+  and beam 2 is the candidate for a future quality mode.
+
+### Fixed
+
+- Corrected the documented legacy Metal environment prefix to
+  `MARIAN_MLX_METAL_*`.
+- Clarified that `beam=1` is a decoder setting, not a model property.
+
 ## [0.7.0] - 2026-07-16
 
 ### Changed

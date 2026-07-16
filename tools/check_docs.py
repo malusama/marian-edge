@@ -350,60 +350,71 @@ def check_deployment_ports(checks: Checks) -> None:
 
 
 def check_custom_port_contract(checks: Checks) -> None:
-    for relative_path in (*README_PATHS, IMMERSIVE_PATH):
-        text = checks.text(relative_path)
-        native_blocks = [
-            block
-            for block in fenced_code_blocks(text)
-            if (
-                "MARIAN_EDGE_PORT=3100" in block
-                or (
-                    re.search(r"(?m)^\s*PORT=3100\s*$", block) is not None
-                    and re.search(
-                        r'MARIAN_EDGE_PORT=(?:"\$PORT"|\$PORT)(?![A-Za-z0-9_])',
-                        block,
-                    )
-                    is not None
-                )
-            )
-        ]
+    user_guides = (*README_PATHS, IMMERSIVE_PATH)
+    for relative_path in user_guides:
+        document = checks.text(relative_path)
+        blocks = fenced_code_blocks(document)
         checks.require(
-            any(
-                (
-                    (
-                        "127.0.0.1:$PORT/readyz" in block
-                        and "127.0.0.1:$PORT/info" in block
-                    )
-                    or (
-                        'SERVICE_ORIGIN="http://127.0.0.1:$PORT"' in block
-                        and '$SERVICE_ORIGIN/readyz' in block
-                        and '$SERVICE_ORIGIN/info' in block
-                    )
-                )
-                and "127.0.0.1:3100/imme" in block
-                and "127.0.0.1:3000/imme" not in block
-                for block in native_blocks
+            "SERVICE_ORIGIN" in document
+            and any(
+                "$SERVICE_ORIGIN/readyz" in block
+                and "$SERVICE_ORIGIN/info" in block
+                for block in blocks
             ),
-            f"{relative_path}: one native 3100 code block must configure the "
-            "installer and use that same port for readyz, info, and /imme",
+            f"{relative_path}: define one SERVICE_ORIGIN and use it for readyz/info",
+        )
+        checks.require(
+            "127.0.0.1:3000/imme" in document
+            and "127.0.0.1:3100/imme" in document,
+            f"{relative_path}: explain both default 3000 and custom 3100 /imme URLs",
         )
 
-    for relative_path in (*README_PATHS, IMMERSIVE_PATH, Path("docs/OPERATIONS.md")):
-        text = checks.text(relative_path)
-        compose_blocks = [
-            block
-            for block in fenced_code_blocks(text)
-            if "MARIAN_EDGE_HOST_PORT=3100" in block
-        ]
+    setup_headings = {
+        Path("README.md"): "Immersive Translate",
+        Path("README.zh-CN.md"): "沉浸式翻译",
+        IMMERSIVE_PATH: "Extension settings",
+    }
+    for relative_path, heading in setup_headings.items():
+        document = checks.text(relative_path)
+        match = re.search(
+            rf"(?ms)^## {re.escape(heading)}\s*$\n(?P<body>.*?)(?=^## |\Z)",
+            document,
+        )
+        body = match["body"] if match is not None else ""
         checks.require(
-            any(
-                "http://127.0.0.1:3100/readyz" in block
-                and "http://127.0.0.1:3100/imme" in block
-                and "http://127.0.0.1:3000/imme" not in block
-                for block in compose_blocks
-            ),
-            f"{relative_path}: one Compose 3100 code block must use host port "
-            "3100 for both readyz and /imme",
+            match is not None and "SERVICE_ORIGIN" in body,
+            f"{relative_path}: {heading!r} section must use SERVICE_ORIGIN",
+        )
+        checks.require(
+            "127.0.0.1:3000/readyz" not in body
+            and "127.0.0.1:3000/imme" not in body,
+            f"{relative_path}: {heading!r} steps must not switch back to a "
+            "hard-coded default port",
+        )
+
+    for relative_path in DEPLOYMENT_DOCS:
+        for block_index, block in enumerate(
+            fenced_code_blocks(checks.text(relative_path)), start=1
+        ):
+            endpoint_ports = {
+                port
+                for port, _ in re.findall(
+                    r"https?://127\.0\.0\.1:(\d+)/(readyz|info|translate|imme)",
+                    block,
+                )
+            }
+            checks.require(
+                len(endpoint_ports) <= 1,
+                f"{relative_path}: fenced block {block_index} mixes endpoint ports "
+                f"{sorted(endpoint_ports)!r}",
+            )
+
+    for relative_path in README_PATHS:
+        document = checks.text(relative_path)
+        checks.require(
+            "MARIAN_EDGE_PORT=\"$PORT\"" in document
+            and "MARIAN_EDGE_HOST_PORT=3100" in document,
+            f"{relative_path}: document native and Compose custom host ports",
         )
 
 
@@ -494,7 +505,7 @@ def check_immersive_contract(checks: Checks) -> None:
         "crates/marian-server/src/lib.rs: /translate language aliases changed",
     )
 
-    for relative_path in (*README_PATHS, IMMERSIVE_PATH):
+    for relative_path in (IMMERSIVE_PATH,):
         document = checks.text(relative_path)
         for field in ("source_lang", "target_lang", "text_list"):
             checks.require(
@@ -533,6 +544,12 @@ def check_immersive_contract(checks: Checks) -> None:
             f"{relative_path}: must document the 512-token output-budget contract",
         )
 
+    for relative_path in README_PATHS:
+        checks.require(
+            "docs/IMMERSIVE_TRANSLATE.md" in checks.text(relative_path),
+            f"{relative_path}: link to the canonical Immersive Translate contract",
+        )
+
 
 def check_controller_lifecycle(checks: Checks) -> None:
     expected = {
@@ -553,7 +570,7 @@ def check_controller_lifecycle(checks: Checks) -> None:
         "scripts/marian-edgectl: expected lifecycle commands are missing: "
         + ", ".join(sorted(expected - commands)),
     )
-    for relative_path in (*README_PATHS, Path("docs/OPERATIONS.md")):
+    for relative_path in (Path("docs/OPERATIONS.md"),):
         document = checks.text(relative_path)
         for command in expected:
             checks.require(
@@ -646,6 +663,29 @@ def check_architecture_contracts(checks: Checks, version: str) -> None:
         "Metal tuning must keep MARIAN_EDGE canonical, accept MARIAN_MLX alias, "
         "and reject conflicts",
     )
+    for relative_path in (
+        Path("docs/ARCHITECTURE.md"),
+        Path("docs/OPERATIONS.md"),
+    ):
+        document = checks.text(relative_path)
+        checks.require(
+            "MARIAN_EDGE_METAL_*" in document
+            and "MARIAN_MLX_METAL_*" in document,
+            f"{relative_path}: document current and legacy Metal setting prefixes",
+        )
+
+    for relative_path in README_PATHS:
+        document = checks.text(relative_path)
+        checks.require(
+            "beam=1" in document
+            and ("decoder" in document.lower() or "解码器" in document),
+            f"{relative_path}: describe beam=1 as a decoder setting",
+        )
+        checks.require(
+            "current release model is beam 1" not in document.lower()
+            and "当前发布模型为 beam 1" not in document,
+            f"{relative_path}: do not describe beam width as a model property",
+        )
 
     checks.require(
         re.search(r'(?m)^panic\s*=\s*"unwind"\s*$', cargo) is not None

@@ -1,67 +1,47 @@
 # Immersive Translate setup
 
-Marian Edge implements Immersive Translate's Custom API at `/imme`. Readiness,
-identity, translation, and extension URLs must all share one service origin:
-only the path changes.
+Marian Edge serves the Immersive Translate Custom API at `/imme`. It does not
+open a second listener for the extension: `/readyz`, `/info`, `/translate`, and
+`/imme` all use the same service origin.
 
-| Deployment | Service listener | Client service origin | Change the client port |
-|---|---|---|---|
-| native macOS installer | `127.0.0.1:3000` by default | `http://127.0.0.1:3000` | install with `MARIAN_EDGE_PORT=3100`; use 3100 everywhere afterward |
-| native source build | `127.0.0.1:3000` by default | `http://127.0.0.1:3000` | use `--bind 127.0.0.1:3100` or `MARIAN_EDGE_BIND=127.0.0.1:3100` |
-| Docker Compose | container `0.0.0.0:3000`; host loopback 3000 by default | `http://127.0.0.1:3000` | use `MARIAN_EDGE_HOST_PORT=3100`; the container remains on 3000 |
-| direct Docker | container `0.0.0.0:3000` | chosen host mapping | publish `127.0.0.1:3100:3000`; use host port 3100 |
+## Find the service address first
 
-For example, this complete native setup uses port 3100 consistently:
+| How the backend was started | Service origin | Extension API URL |
+|---|---|---|
+| default macOS install or default Compose | `http://127.0.0.1:3000` | `http://127.0.0.1:3000/imme` |
+| `--bind 127.0.0.1:3100` | `http://127.0.0.1:3100` | `http://127.0.0.1:3100/imme` |
+| native install with `MARIAN_EDGE_PORT=3100` | `http://127.0.0.1:3100` | `http://127.0.0.1:3100/imme` |
+| Compose with `MARIAN_EDGE_HOST_PORT=3100` | `http://127.0.0.1:3100` | `http://127.0.0.1:3100/imme` |
+
+Container port 3000 is an internal detail. A client uses the published host
+port. If readiness succeeds on 3100, the extension must also use 3100.
+
+Set `SERVICE_ORIGIN` once and use it for every check:
 
 ```sh
-PORT=3100
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/malusama/marian-edge/v0.7.0/scripts/install-macos.sh | \
-  MARIAN_EDGE_VERSION=v0.7.0 MARIAN_EDGE_PORT="$PORT" sh
-
-SERVICE_ORIGIN="http://127.0.0.1:$PORT"
+SERVICE_ORIGIN=http://127.0.0.1:3100  # replace with the running backend
 curl -fsS "$SERVICE_ORIGIN/readyz"
 curl -fsS "$SERVICE_ORIGIN/info"
-# Enter http://127.0.0.1:3100/imme in Immersive Translate.
 ```
 
-The equivalent Compose setup is:
-
-```sh
-MARIAN_EDGE_HOST_PORT=3100 docker compose up -d
-curl -fsS http://127.0.0.1:3100/readyz
-# Enter http://127.0.0.1:3100/imme in Immersive Translate.
-```
+For a native installation, the saved port is available at
+`~/.local/share/marian-edge/config/port`. For a foreground source build, use
+the value passed to `--bind` or `MARIAN_EDGE_BIND`.
 
 ## Extension settings
 
-The following steps use the default service origin
-`http://127.0.0.1:3000`. Substitute the actual host port if it was changed.
-
-1. Confirm `http://127.0.0.1:3000/readyz` returns HTTP 200 and inspect
-   `http://127.0.0.1:3000/info`.
+1. Confirm `$SERVICE_ORIGIN/readyz` returns HTTP 200.
 2. Open **Immersive Translate > Options > Developer settings** and enable beta
    testing features.
-3. Open **Options > General**, choose **Custom API** as the translation
-   service, and enter `http://127.0.0.1:3000/imme` as the API URL.
-4. Set the page/source language to **English** and the target language to
-   **Simplified Chinese** (`zh-CN`).
-5. Translate a short English page first. Keep the extension defaults unless
-   the service reports overload or timeouts.
+3. Under **Options > General**, select **Custom API**.
+4. Enter the service origin followed by `/imme`. For example, a backend on
+   3100 uses `http://127.0.0.1:3100/imme`.
+5. Select English as the source and Simplified Chinese (`zh-CN`) as the target.
 
-Chinese UI labels can vary slightly by extension version: “开发者设置 / Beta
-测试功能”, “基本设置 / 翻译服务 / 自定义 API”. The request and response fields
-below follow the [official Immersive Translate Custom API
-contract](https://immersivetranslate.com/docs/services/custom/).
+Chinese UI labels vary slightly by extension version. The relevant items are
+usually “开发者设置 / Beta 测试功能” and “基本设置 / 翻译服务 / 自定义 API”.
 
-The server normalizes `en-US`, `en_US`, `zh-CN`, and `zh-Hans` to the model's
-primary codes. `auto` uses a small English/CJK detector; explicitly choosing
-English is more predictable because this release has only the `en -> zh`
-model.
-
-## Verify the exact extension contract
-
-Set `SERVICE_ORIGIN` to the origin actually used by the deployment:
+## Test the payload
 
 ```sh
 SERVICE_ORIGIN=${SERVICE_ORIGIN:-http://127.0.0.1:3000}
@@ -74,7 +54,7 @@ curl -fsS "$SERVICE_ORIGIN/imme" \
   }'
 ```
 
-The response shape is:
+Response:
 
 ```json
 {
@@ -85,37 +65,40 @@ The response shape is:
 }
 ```
 
-The two translation endpoints intentionally have different request shapes:
+The server normalizes `en-US`, `en_US`, `zh-CN`, and `zh-Hans` to `en` and
+`zh`. `auto` uses a small English/CJK heuristic; explicitly selecting English
+is more predictable because this release contains only an `en -> zh` model.
 
-| Endpoint | Accepted fields | Output budget |
+## Request limits
+
+`/imme` and `/translate` use different JSON shapes:
+
+| Endpoint | Fields | Limits |
 |---|---|---|
-| `POST /imme` | optional `source_lang`, required `target_lang`, required `text_list` | the contract does not define `max_output_tokens`; each item starts with the default 512-token budget |
-| `POST /translate` | required `text` and `to`, optional `from` and `max_output_tokens`; `source_lang`/`target_lang` are aliases for `from`/`to` | defaults to 512 and is clamped to 1-2,048 |
+| `POST /imme` | optional `source_lang`, required `target_lang`, required `text_list` | at most 256 nonempty items; each item starts with a 512-token output budget |
+| `POST /translate` | required `text` and `to`; optional `from` and `max_output_tokens` | output budget defaults to 512 and is clamped to 1-2,048 |
 
-Do not send `/translate`'s `from`/`to` shape to `/imme`. The complete JSON
-request body is limited to 64 KiB, including JSON syntax and every list item.
-`text_list` may contain at most 256 nonempty items, and every text passed to
-either endpoint must be nonempty. The output budget is a caller ceiling rather
-than a promise to generate that many tokens; EOS and backend model/runtime
-limits may stop generation earlier.
+The complete JSON request body is limited to 64 KiB. EOS or a backend limit may
+end generation before the output budget is reached.
 
-The Custom API reserves placeholders such as `{0}` and `<b0></b0>`. Current
-model-backed FP32 CPU and Metal regressions preserve those placeholder strings
-and their order, while an HTTP adapter regression covers the `/imme` shape.
-This is compatibility evidence for those tested paths, not a general
-translation-quality or Q8 claim.
+Immersive Translate placeholders such as `{0}` and `<b0></b0>` are covered by
+the FP32 CPU and Metal regression tests. That test does not establish general
+translation quality or Q8 equivalence.
+
+The payload follows Immersive Translate's
+[Custom API documentation](https://immersivetranslate.com/docs/services/custom/).
 
 ## CORS
 
 CORS is disabled by default. Extension host permissions are usually enough for
-loopback access. If the extension explicitly reports a CORS failure, configure
-its exact trusted origin with `MARIAN_EDGE_CORS_ORIGIN`. Use `*` only for a
-personal service that remains bound and published on loopback.
+loopback access. If the extension reports a CORS error, configure its exact
+trusted origin with `MARIAN_EDGE_CORS_ORIGIN`.
 
-When CORS is enabled, the server allows GET, POST, and the `Content-Type`
-header. Custom browser headers such as `Authorization` are not in the current
-allowlist. Re-running the native installer without an explicit port preserves
-the previously saved port:
+Use `*` only for a personal service that remains bound to loopback. The server
+accepts GET, POST, and the `Content-Type` header when CORS is enabled; custom
+headers such as `Authorization` are not allowed.
+
+Re-running the native installer without a port argument keeps the saved port:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
@@ -126,22 +109,16 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 ## Troubleshooting
 
-- `/readyz` returns 503: the model worker is not ready, is draining, or has
-  stopped. Inspect `/info` and service logs. Queue saturation does not change
-  `/readyz`.
-- `/translate` or `/imme` returns `503` with `Retry-After: 1`: the bounded
-  admission queue is full or shutting down. Retry with jitter or lower
-  concurrency.
-- `422 unsupported direction`: make the source English and target Simplified
-  Chinese; Chinese-to-English is not included yet.
-- Browser cannot connect: use the host's loopback address, not a
-  container-only hostname. Confirm `/readyz` and `/imme` use the same host port;
-  a Docker container still listens internally on 3000 even when the host
-  publishes 3100.
-- Translation differs from another local service: the native direct Metal
-  backend uses FP32 weights while the pure-Rust CPU container uses Q8 weights;
-  near-tie token choices can differ. The Q8 release gate requires the five
-  golden translations but does not claim bit-for-bit FP32 equivalence.
-- A long paragraph is returned as one list item: CPU and Metal both use the
-  shared tokenizer-aware segmenter, translate bounded chunks, preserve
-  separators such as newlines, and reassemble the result in order.
+- Cannot connect: verify the exact `$SERVICE_ORIGIN/readyz` URL, then use the
+  same origin with `/imme`. Do not use a container-only hostname.
+- `/readyz` returns 503: the model is starting, draining, or stopped. Check
+  `/info` and service logs.
+- `/translate` or `/imme` returns 503 with `Retry-After: 1`: the request queue
+  is full. Retry with jitter or reduce concurrency.
+- `422 unsupported direction`: choose English as the source and Simplified
+  Chinese as the target.
+- A long paragraph returns as one list item: both backends split oversized text
+  internally and then reassemble it, preserving separators such as newlines.
+- CPU and Metal translations differ: the native backend uses FP32 weights while
+  the published CPU image uses Q8 weights; close token scores can resolve
+  differently.

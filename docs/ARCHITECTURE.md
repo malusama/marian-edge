@@ -1,12 +1,10 @@
-# Architecture and maintenance guide
+# Architecture
 
-This document defines where policy lives, how a request moves through the
-system, and which boundaries must remain stable as new backends or language
-directions are added.
+This document shows the request path and where each part of the runtime lives.
 
-The central rule is simple: `marian-core` owns backend-neutral policy;
-backends own execution mechanisms and hardware choices. HTTP adapters must not
-reimplement scheduler policy, and the scheduler must not learn GPU geometry.
+`marian-core` contains backend-neutral behavior. CPU and Metal crates contain
+hardware-specific execution. HTTP routes do not implement batching policy, and
+the scheduler does not contain GPU tuning values.
 
 ## Request path
 
@@ -71,7 +69,7 @@ metrics, and canonical `MARIAN_EDGE_*` environment contract use the Marian Edge
 name. The historical `MARIAN_MLX_*` runtime settings, `mlx` Cargo feature, and
 CLI backend value remain migration aliases; they do not link the MLX runtime.
 
-## Model boundary
+## Model format
 
 New model manifests use the backend-neutral
 `marian-edge.transformer-ssru.v1` namespace. Loaders, the installer, and the
@@ -86,7 +84,7 @@ limit, and the shared sinusoidal table. CPU source, generation, batch, and
 padded-attention limits remain private to `marian-cpu`; device tuning remains
 private to `marian-metal`.
 
-## Long-text contract
+## Long text
 
 `marian-core::segment_text` is tokenizer-independent: a backend supplies a
 closure that returns the exact source-piece count. The shared algorithm prefers
@@ -109,7 +107,7 @@ replace backend token limits. `max_output_tokens` is a caller ceiling, not a
 promise to generate that many tokens; EOS and model/runtime ceilings may stop
 generation earlier.
 
-## Scheduling contract
+## Scheduling
 
 Requests enter a finite admission queue. A batch is compatible when its
 language direction, output budget, and power-of-two source-character-count
@@ -128,7 +126,7 @@ for an accelerator occupancy knee, but it must return exactly one result per
 logical row. The Metal backend makes that physical-row decision from its tuning
 profile. There is no cross-batch translation-result cache.
 
-Important invariants:
+Runtime rules:
 
 - queue capacity is finite and overload is visible to callers;
 - model construction, inference, and destruction stay on the owner thread;
@@ -151,9 +149,9 @@ and Rayon pools before inference starts. It changes internal compute
 parallelism, not model ownership. HTTP timeouts do not cancel synchronous work
 already executing on the owner thread.
 
-The Q8 path strictly parses the Marian binary v1 artifact and validates the
-complete expected tensor set. Exact scalar fallbacks remain the correctness
-oracle for hardware-specific kernels and sensitive reduction order.
+The Q8 path parses the Marian binary v1 format and validates the expected
+tensors. Scalar implementations are used to check hardware-specific kernels
+and reductions whose order affects output.
 
 ## Native Metal backend
 
@@ -173,28 +171,23 @@ FlashAttention-style online-softmax kernel. It streams key/value tiles and
 writes only the final accumulation instead of an O(N^2) score matrix. Classic
 score/softmax/value kernels remain an explicit fallback and A/B path.
 
-The Metal crate is split by reason to change:
+The main Metal modules are:
 
-| Module | Owns | Does not own |
-|---|---|---|
-| `config` | Public process inputs and environment parsing | Device defaults or graph decisions |
-| `tuning` | Resolved device-family attention, decode, occupancy, and GEMM policy | Environment reads or command encoding |
-| `backend` | Tokenization, segmentation, physical repetition materialization, and result assembly | Metal ABI or generic scheduler policy |
-| `engine.rs` | Model lifetime, request validation, fail-closed health, and encoder/request orchestration | Process configuration parsing or low-level kernel bindings |
-| `engine/model` | Artifact validation and natural packed-weight structures | Decode policy or request state |
-| `engine/decode` | Candidate preparation, output limits, and decode-submission loop | Pipeline objects, ABI parameter layouts, or raw dispatch |
-| `engine/ops` | Checked graph primitives, Metal ABI values, and dispatch geometry | Request admission, decode-loop policy, or artifact parsing |
-| `metal_runtime` | Metal/MPS objects, command buffers, pipelines, matrix views, and device legality | Model graph or request policy |
-| `workspace` | Request/transient arenas and frame lifetime enforcement | Model semantics or tuning values |
+| Module | Responsibility |
+|---|---|
+| `config` | command-line and environment settings |
+| `tuning` | device-family defaults for attention, decode, occupancy, and GEMM |
+| `backend` | tokenization, calls into the shared segmenter, physical repetition, and result assembly |
+| `engine/model` | model validation and packed weight structures |
+| `engine/decode` | candidate preparation, output limits, and the decode loop |
+| `engine/ops` | graph operations, Metal parameter values, and dispatch geometry |
+| `metal_runtime` | Metal/MPS objects, command buffers, pipelines, and matrix views |
+| `workspace` | request and transient buffer arenas |
 
-Process input is parsed into `MetalConfig`, then
-`MetalBackend::load_with_config` validates artifacts and calls
-`MetalEngine::load`. The engine selects the device, resolves `MetalTuning`, and
-exposes resolved identity and duplicate width back to the backend. Mechanism
-flows from `engine/decode` through `engine/ops` to `metal_runtime` and
-`workspace`. The primitive layer never depends back on decode, and model
-loading never depends on either decode or primitive dispatch. Keep those
-directions when adding a kernel, model format, or device profile.
+`MetalBackend::load_with_config` validates the model and calls
+`MetalEngine::load`. The engine selects a device and resolves `MetalTuning`.
+Decode code calls graph operations, which in turn use `metal_runtime` and
+`workspace`; low-level operations do not depend on the decode loop.
 
 ### Resource lifetimes
 
@@ -221,10 +214,9 @@ M1, M2, M3, M4, or generic profile; `MARIAN_EDGE_METAL_PROFILE` can override it
 for controlled qualification. `/info` includes the active profile with the
 attention label.
 
-`MARIAN_EDGE_METAL_*` is the canonical tuning namespace, consistent with the
-rest of the installed product. `MARIAN_EDGE_METAL_*` is accepted as an alias;
-setting both names to different values fails closed instead of choosing one
-silently.
+`MARIAN_EDGE_METAL_*` is the current tuning namespace.
+`MARIAN_MLX_METAL_*` remains available for migration; setting both forms to
+different values is an error.
 
 The M1 defaults are measured in the v0.6.0 release qualification on the
 documented Apple M1 host. Later-family and generic defaults are conservative
@@ -256,7 +248,7 @@ external `.metallib` because the MSL source is embedded in the executable.
 
 List a direction only after its runtime and tests are present.
 
-## Release boundary
+## Release layout
 
 Source, runtime binaries, and model artifacts are versioned separately. Native
 macOS archives contain one server executable; Linux images contain the Rust

@@ -1,0 +1,90 @@
+{
+  "schema": "marian-edge.beam-width-reference.v1",
+  "measured_at_utc": "2026-07-16T16:07:00Z",
+  "purpose": "exploratory beam-width comparison; not a current Rust backend qualification",
+  "host": {
+    "device": "Apple M1 Pro",
+    "os": "macOS 26.5.1",
+    "cpu_threads": 1
+  },
+  "reference_runtime": {
+    "repository": "https://github.com/mozilla/translations",
+    "commit": "f31423c7c2c6ed8ae57d71a3d19a9db6f156060e",
+    "decoder": "Mozilla Marian fork",
+    "temporary_build_notes": [
+      "changed an obsolete constexpr enum use to const for the current Xcode compiler",
+      "updated the bundled zlib TARGET_OS_MAC check",
+      "made two variable-length-array sizes const"
+    ]
+  },
+  "model": {
+    "id": "mozilla-firefox-translations-en-zh-base-memory",
+    "precision": "int8shiftAlphaAll",
+    "sha256": "4e5accc141373565ddc8fa1565bceaa8d0c3482a82cab8131c719ebcc6c2157c"
+  },
+  "decoder_settings": {
+    "normalize": 1.0,
+    "word_penalty": 0,
+    "maximum_length_factor": 2.0,
+    "mini_batch": 16,
+    "workspace_mib": 128,
+    "skip_cost": {
+      "beam_1": true,
+      "beam_2": false,
+      "beam_4": false
+    }
+  },
+  "dataset": {
+    "name": "FLORES-200 devtest en-to-zh",
+    "sentences": 1012,
+    "source_sha256": "612e9fbe87997617c0fa8fa8929654a4f49b728d96738112c2b86ef6a1d78d88",
+    "reference_sha256": "b30158b1b76f7cee08530d8127a9769f4512597c7eefe97ae1ccf630d5b6e7fd"
+  },
+  "scoring": {
+    "tool": "SacreBLEU 2.5.1",
+    "bleu_signature": "nrefs:1|case:mixed|eff:no|tok:zh|smooth:exp|version:2.5.1",
+    "chrf2pp_signature": "nrefs:1|case:mixed|eff:yes|nc:6|nw:2|space:no|version:2.5.1",
+    "paired_bootstrap_samples": 1000
+  },
+  "results": {
+    "beam_1": {
+      "elapsed_seconds": 12.32,
+      "bleu": 38.8,
+      "chrf2pp": 25.0,
+      "output_sha256": "18257e1f10a71e24b120323ea9f024b20472e9b1b65cc93a90fbce95e8482acd"
+    },
+    "beam_2": {
+      "elapsed_seconds": 16.45,
+      "elapsed_change_percent": 33.5,
+      "bleu": 39.5,
+      "chrf2pp": 25.4,
+      "paired_p_value_vs_beam_1": {
+        "bleu": 0.001,
+        "chrf2pp": 0.002
+      },
+      "output_sha256": "a6986fe224450040b4e3df140a382e1be89a4f408749810621fcf73d1be81ffa"
+    },
+    "beam_4": {
+      "elapsed_seconds": 23.19,
+      "elapsed_change_percent": 88.2,
+      "bleu": 39.7,
+      "chrf2pp": 25.6,
+      "paired_p_value_vs_beam_1": {
+        "bleu": 0.001,
+        "chrf2pp": 0.001
+      },
+      "paired_p_value_vs_beam_2": {
+        "bleu": 0.032,
+        "chrf2pp": 0.017
+      },
+      "output_sha256": "cae4b0eaee02252457f080319fa7191822acfa4f75dd1ed3dbb34247c3bdb1f4"
+    }
+  },
+  "repository_corpus_observation": {
+    "corpus_sha256": "41fbef085648815e15bd7ec7261816c9d55c1f04c2489cab3e7550887449de0b",
+    "beam_1_to_2_changed_outputs": 56,
+    "beam_2_to_4_changed_outputs": 36,
+    "release_golden_unchanged_at_beams_1_2_4": true
+  },
+  "conclusion": "Keep beam 1 as the latency default; beam 2 is the first candidate for a separately qualified quality mode."
+}
