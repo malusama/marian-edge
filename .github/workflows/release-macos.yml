@@ -18,11 +18,12 @@ jobs:
         run: rustup show active-toolchain
       - name: Portable release gates
         run: make check
-      - name: Native Metal unit gates
+      - name: Native Metal and CPU unit gates
         run: |
           cargo clippy --locked -p marian-metal --all-targets --features metal -- -D warnings
-          cargo clippy --locked -p marian-server --all-targets --features metal -- -D warnings
+          cargo clippy --locked -p marian-server --all-targets --features metal,cpu -- -D warnings
           cargo test --locked -p marian-metal --features metal --lib
+          cargo test --locked -p marian-server --features metal,cpu
           python3 tools/test_summarize_metal_trace.py
       - name: Check tag version
         run: |

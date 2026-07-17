@@ -25,7 +25,7 @@ printf '%s\n' "$VERSION" | grep -Eq \
 "$ROOT/scripts/build-release.sh"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/scripts" "$BUNDLE/tools" \
-  "$BUNDLE/packaging/launchd"
+  "$BUNDLE/packaging/launchd" "$BUNDLE/packaging/models"
 install -m 0755 "$ROOT/target/release/marian-edge-server" "$BUNDLE/marian-edge-server"
 install -m 0755 "$ROOT/scripts/prepare-enzh-model.sh" "$BUNDLE/scripts/prepare-enzh-model.sh"
 install -m 0755 "$ROOT/scripts/marian-edgectl" "$BUNDLE/scripts/marian-edgectl"
@@ -34,6 +34,8 @@ install -m 0755 "$ROOT/tools/convert_marian.py" "$BUNDLE/tools/convert_marian.py
 install -m 0644 \
   "$ROOT/packaging/launchd/io.github.malusama.marian-edge.plist" \
   "$BUNDLE/packaging/launchd/io.github.malusama.marian-edge.plist"
+install -m 0644 "$ROOT/packaging/models/enzh-q8-manifest.json" \
+  "$BUNDLE/packaging/models/enzh-q8-manifest.json"
 install -m 0644 "$ROOT/LICENSE" "$BUNDLE/LICENSE"
 install -m 0644 "$ROOT/LICENSE-APACHE-2.0" "$BUNDLE/LICENSE-APACHE-2.0"
 install -m 0644 "$ROOT/THIRD_PARTY_NOTICES.md" "$BUNDLE/THIRD_PARTY_NOTICES.md"

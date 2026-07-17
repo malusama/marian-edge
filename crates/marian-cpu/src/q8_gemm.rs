@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::{fmt, mem::size_of};
 
 use rten_gemm::{GemmExecutor, GemmInputA, GemmInputB, PackedBMatrix, QuantParams};
@@ -36,7 +36,7 @@ pub struct Q8Linear {
     weight_quant_mult: f32,
     bias: Option<Vec<f32>>,
     executor: GemmExecutor<u8, i8, i32>,
-    packed_weights: PackedBMatrix<i8>,
+    packed_weights: OnceLock<PackedBMatrix<i8>>,
     execution_path: Q8ExecutionPath,
 }
 
@@ -124,9 +124,17 @@ impl Q8Linear {
         }
 
         let executor = GemmExecutor::<u8, i8, i32>::new();
-        let weight_view =
-            NdTensorView::from_data([output_dim, input_dim], weights_output_input.as_slice());
-        let packed_weights = executor.prepack_b(weight_view.transposed());
+        let packed_weights = OnceLock::new();
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let weight_view =
+                NdTensorView::from_data([output_dim, input_dim], weights_output_input.as_slice());
+            assert!(
+                packed_weights
+                    .set(executor.prepack_b(weight_view.transposed()))
+                    .is_ok()
+            );
+        }
 
         // AVX2 uses vpmaddubsw internally. Restricting B to signed 7-bit makes
         // every pairwise i16 partial sum safe. Real Marian Q8 weights use the
@@ -217,6 +225,8 @@ impl Q8Linear {
                     format!("invalid packed weights for {packed_kernel_name}: {error}"),
                 )
             })?;
+        let packed_cell = OnceLock::new();
+        assert!(packed_cell.set(packed_weights).is_ok());
         Ok(Self {
             name,
             input_dim,
@@ -226,7 +236,7 @@ impl Q8Linear {
             weight_quant_mult,
             bias,
             executor,
-            packed_weights,
+            packed_weights: packed_cell,
             execution_path: Q8ExecutionPath::Rten,
         })
     }
@@ -292,6 +302,8 @@ impl Q8Linear {
                     format!("invalid shared packed weights for {packed_kernel_name}: {error}"),
                 )
             })?;
+        let packed_cell = OnceLock::new();
+        assert!(packed_cell.set(packed_weights).is_ok());
         Ok(Self {
             name,
             input_dim,
@@ -301,7 +313,7 @@ impl Q8Linear {
             weight_quant_mult,
             bias,
             executor,
-            packed_weights,
+            packed_weights: packed_cell,
             execution_path: Q8ExecutionPath::Rten,
         })
     }
@@ -345,13 +357,15 @@ impl Q8Linear {
     /// Copies the architecture-specific packed buffer for offline artifact
     /// generation. Runtime inference never calls this method.
     pub fn packed_words(&self) -> Vec<u32> {
-        self.packed_weights.clone().into_vec()
+        self.packed_weights().clone().into_vec()
     }
 
     /// Return canonical and architecture-packed weight storage in bytes.
     pub fn weight_storage_bytes(&self) -> (usize, usize) {
         let canonical = self.weights.len();
-        let packed = self.packed_weights.clone().into_vec().len() * size_of::<u32>();
+        let packed = self.packed_weights.get().map_or(0, |weights| {
+            weights.clone().into_vec().len() * size_of::<u32>()
+        });
         (canonical, packed)
     }
 
@@ -440,6 +454,23 @@ impl Q8Linear {
         output: &mut [i32],
         zero_points: &mut Vec<u8>,
     ) -> Result<(), Q8Error> {
+        #[cfg(target_arch = "aarch64")]
+        if rows <= 3 && !self.weights.is_empty() {
+            output.fill(0);
+            for (activations, output_row) in quantized
+                .chunks_exact(self.input_dim)
+                .zip(output.chunks_exact_mut(self.output_dim))
+            {
+                for (accumulator, weights) in output_row
+                    .iter_mut()
+                    .zip(self.weights.chunks_exact(self.input_dim))
+                {
+                    *accumulator = crate::q8_arm::dot_u8_i8(activations, weights);
+                }
+            }
+            return Ok(());
+        }
+
         let lhs = NdTensorView::from_data([rows, self.input_dim], quantized);
         zero_points.clear();
         zero_points.resize(rows, ACTIVATION_ZERO_POINT);
@@ -466,7 +497,7 @@ impl Q8Linear {
             self.executor.gemm(
                 output,
                 GemmInputA::Unpacked(lhs),
-                GemmInputB::Packed(&self.packed_weights),
+                GemmInputB::Packed(self.packed_weights()),
                 1.0,
                 0,
                 None,
@@ -480,7 +511,7 @@ impl Q8Linear {
         let result = self.executor.gemm(
             output,
             GemmInputA::Unpacked(lhs),
-            GemmInputB::Packed(&self.packed_weights),
+            GemmInputB::Packed(self.packed_weights()),
             1.0,
             0,
             None,
@@ -491,6 +522,18 @@ impl Q8Linear {
         );
         result.map_err(|error| Q8Error::Gemm(format!("{}: {error}", self.name)))?;
         Ok(())
+    }
+
+    fn packed_weights(&self) -> &PackedBMatrix<i8> {
+        self.packed_weights.get_or_init(|| {
+            assert!(
+                !self.weights.is_empty(),
+                "restored Q8 operators must include packed weights"
+            );
+            let weights =
+                NdTensorView::from_data([self.output_dim, self.input_dim], self.weights.as_slice());
+            self.executor.prepack_b(weights.transposed())
+        })
     }
 
     fn run_scalar_into(&self, quantized: &[u8], rows: usize, output: &mut [i32]) {
@@ -593,6 +636,19 @@ mod tests {
         for (input, rows) in [
             (vec![0.0, 0.25, -0.5, 1.0], 1),
             (vec![0.0, 0.25, -0.5, 1.0, 1.25, -1.0, 0.5, -0.25], 2),
+            (
+                vec![
+                    0.0, 0.25, -0.5, 1.0, 1.25, -1.0, 0.5, -0.25, -2.0, 0.75, 1.5, 0.0,
+                ],
+                3,
+            ),
+            (
+                vec![
+                    0.0, 0.25, -0.5, 1.0, 1.25, -1.0, 0.5, -0.25, -2.0, 0.75, 1.5, 0.0, 0.5, 0.5,
+                    -0.5, -0.5,
+                ],
+                4,
+            ),
         ] {
             let quantized = quantize_symmetric_u8(&input, 4.0).unwrap();
             let mut expected = Vec::new();

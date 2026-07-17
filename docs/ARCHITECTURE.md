@@ -141,13 +141,15 @@ Runtime rules:
 `--backend cpu` validates the manifest and selects Q8 or FP32 execution. It is
 the automatic Linux and container backend. Q8 dense weights stay quantized;
 embedding rows and shortlist values are materialized only when required. The
-executor uses reusable scratch and shape-aware kernels rather than additional
-model owners.
+executor uses reusable scratch and shape-aware kernels. Multiple Q8 workers
+share immutable weights, tokenizers, shortlist data, and positional tables
+while retaining independent activation scratch and bounded queues.
 
 `--cpu-threads` accepts 1, 2, or 4 and configures both the FP32 matrix-multiply
-and Rayon pools before inference starts. It changes internal compute
-parallelism, not model ownership. HTTP timeouts do not cancel synchronous work
-already executing on the owner thread.
+and Rayon pools before inference starts. `--cpu-workers` accepts 1 through 8;
+Q8 workers share model storage, while FP32 workers currently load independent
+executors. HTTP timeouts do not cancel synchronous work already executing on an
+owner thread.
 
 The Q8 path parses the Marian binary v1 format and validates the expected
 tensors. Scalar implementations are used to check hardware-specific kernels
@@ -165,6 +167,11 @@ FP32 is the default precision contract. The explicit
 `MARIAN_EDGE_METAL_PRECISION=mixed-f16` mode stores uploaded model weights in
 FP16 while retaining FP32 activations and reductions; `/info` reports the
 selected precision.
+
+Metal does not currently accept Q8 manifests. M1 exposes fast ARM SDOT to the
+CPU backend but no equivalent MPS INT8 matrix-multiply contract; a future Metal
+Q8 path needs custom packed-weight/dequantization kernels and separate quality
+and performance qualification.
 
 Supported self-attention and single-query cross-attention use a
 FlashAttention-style online-softmax kernel. It streams key/value tiles and

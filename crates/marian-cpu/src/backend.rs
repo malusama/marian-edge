@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use marian_core::{
     BackendError, BackendInfo, TranslationBackend, TranslationInput, TranslationOutput,
@@ -20,7 +23,7 @@ use crate::{
 /// A pure Rust SentencePiece crate can implement this directly, or callers can
 /// use a small local newtype adapter. The tensor executor itself never depends
 /// on a tokenizer implementation.
-pub trait TextTokenizer: 'static {
+pub trait TextTokenizer: Send + Sync + 'static {
     fn vocabulary_size(&self) -> usize;
 
     fn encode(&self, text: &str) -> Result<Vec<i32>, String>;
@@ -493,8 +496,8 @@ impl TranslationBackend for CpuBackend {
 /// `marian_core` backend backed by the pure Rust Q8 executor.
 pub struct Q8CpuBackend {
     engine: Q8CpuEngine,
-    source: Box<dyn TextTokenizer>,
-    target: Box<dyn TextTokenizer>,
+    source: Arc<dyn TextTokenizer>,
+    target: Arc<dyn TextTokenizer>,
     source_lang: String,
     target_lang: String,
     model_id: String,
@@ -527,7 +530,7 @@ impl Q8CpuBackend {
                 target_path.display()
             ))
         })?;
-        Self::load_verified(model_dir, manifest, Box::new(source), Box::new(target))
+        Self::load_verified(model_dir, manifest, Arc::new(source), Arc::new(target))
     }
 
     /// Loads a complete Q8 backend from byte payloads, for sandboxed runtimes
@@ -558,8 +561,8 @@ impl Q8CpuBackend {
             manifest,
             weights_bytes,
             shortlist_bytes,
-            Box::new(source),
-            Box::new(target),
+            Arc::new(source),
+            Arc::new(target),
         )
     }
 
@@ -658,8 +661,8 @@ impl Q8CpuBackend {
         drop(shortlist_bytes);
         Ok(Self {
             engine,
-            source: Box::new(source),
-            target: Box::new(target),
+            source: Arc::new(source),
+            target: Arc::new(target),
             source_lang: manifest.source_lang,
             target_lang: manifest.target_lang,
             model_id: manifest.model_id,
@@ -718,8 +721,8 @@ impl Q8CpuBackend {
         drop(shortlist_bytes);
         Ok(Self {
             engine,
-            source: Box::new(source),
-            target: Box::new(target),
+            source: Arc::new(source),
+            target: Arc::new(target),
             source_lang: manifest.source_lang,
             target_lang: manifest.target_lang,
             model_id: manifest.model_id,
@@ -748,8 +751,8 @@ impl Q8CpuBackend {
             manifest,
             weights_bytes,
             shortlist_bytes,
-            Box::new(source),
-            Box::new(target),
+            Arc::new(source),
+            Arc::new(target),
         )
     }
 
@@ -771,15 +774,15 @@ impl Q8CpuBackend {
         })?;
         let manifest = ModelManifest::load(&model_dir)?;
         manifest.verify_runtime_files(&model_dir)?;
-        Self::load_verified(model_dir, manifest, Box::new(source), Box::new(target))
+        Self::load_verified(model_dir, manifest, Arc::new(source), Arc::new(target))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn load_verified(
         model_dir: impl AsRef<Path>,
         manifest: ModelManifest,
-        source: Box<dyn TextTokenizer>,
-        target: Box<dyn TextTokenizer>,
+        source: Arc<dyn TextTokenizer>,
+        target: Arc<dyn TextTokenizer>,
     ) -> Result<Self, BackendError> {
         if manifest.precision != "q8" {
             return Err(BackendError::Model(format!(
@@ -824,8 +827,8 @@ impl Q8CpuBackend {
         manifest: ModelManifest,
         weights: &[u8],
         shortlist: Option<&[u8]>,
-        source: Box<dyn TextTokenizer>,
-        target: Box<dyn TextTokenizer>,
+        source: Arc<dyn TextTokenizer>,
+        target: Arc<dyn TextTokenizer>,
     ) -> Result<Self, BackendError> {
         if manifest.precision != "q8" {
             return Err(BackendError::Model(format!(
@@ -864,8 +867,8 @@ impl Q8CpuBackend {
         manifest: ModelManifest,
         weights: Vec<u8>,
         shortlist: Option<Vec<u8>>,
-        source: Box<dyn TextTokenizer>,
-        target: Box<dyn TextTokenizer>,
+        source: Arc<dyn TextTokenizer>,
+        target: Arc<dyn TextTokenizer>,
     ) -> Result<Self, BackendError> {
         if manifest.precision != "q8" {
             return Err(BackendError::Model(format!(
@@ -906,6 +909,20 @@ impl Q8CpuBackend {
     pub fn engine(&self) -> &Q8CpuEngine {
         &self.engine
     }
+
+    /// Create an executor that shares immutable model and tokenizer data while
+    /// retaining independent activation and batching scratch.
+    pub fn fork(&self) -> Self {
+        Self {
+            engine: self.engine.fork(),
+            source: Arc::clone(&self.source),
+            target: Arc::clone(&self.target),
+            source_lang: self.source_lang.clone(),
+            target_lang: self.target_lang.clone(),
+            model_id: self.model_id.clone(),
+            eos_id: self.eos_id,
+        }
+    }
 }
 
 impl TranslationBackend for Q8CpuBackend {
@@ -945,6 +962,55 @@ impl TranslationBackend for Q8CpuBackend {
 pub enum CpuModelBackend {
     Fp32(CpuBackend),
     Q8(Q8CpuBackend),
+}
+
+/// Reusable native backend factory. Q8 workers share one immutable model;
+/// FP32 workers retain the legacy independent-loader behavior.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct CpuModelBackendFactory {
+    model_dir: PathBuf,
+    precision: String,
+    q8_template: Mutex<Option<Q8CpuBackend>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CpuModelBackendFactory {
+    pub fn new(model_dir: impl AsRef<Path>) -> Result<Self, BackendError> {
+        let model_dir = std::fs::canonicalize(model_dir.as_ref()).map_err(|error| {
+            BackendError::Model(format!(
+                "failed to resolve model directory {}: {error}",
+                model_dir.as_ref().display()
+            ))
+        })?;
+        let manifest = ModelManifest::load(&model_dir)?;
+        match manifest.precision.as_str() {
+            "fp32" | "q8" => Ok(Self {
+                model_dir,
+                precision: manifest.precision,
+                q8_template: Mutex::new(None),
+            }),
+            precision => Err(BackendError::Model(format!(
+                "unsupported pure Rust CPU precision {precision}"
+            ))),
+        }
+    }
+
+    pub fn create(&self) -> Result<CpuModelBackend, BackendError> {
+        if self.precision == "fp32" {
+            return CpuBackend::load(&self.model_dir).map(CpuModelBackend::Fp32);
+        }
+
+        let mut template = self
+            .q8_template
+            .lock()
+            .map_err(|_| BackendError::Model("Q8 shared-model factory was poisoned".into()))?;
+        if let Some(template) = template.as_ref() {
+            return Ok(CpuModelBackend::Q8(template.fork()));
+        }
+        let backend = Q8CpuBackend::load(&self.model_dir)?;
+        *template = Some(backend.fork());
+        Ok(CpuModelBackend::Q8(backend))
+    }
 }
 
 impl CpuModelBackend {

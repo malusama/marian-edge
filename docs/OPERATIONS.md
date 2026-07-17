@@ -131,6 +131,7 @@ port and CORS; shell exports do not alter an already installed LaunchAgent.
 | `MARIAN_EDGE_BACKEND` | `auto` | `auto`, `metal`, `cpu`, or development-only `echo` |
 | `MARIAN_EDGE_MODEL_DIR` | `models/enzh` | model directory; container image uses `/models/en-zh` |
 | `MARIAN_EDGE_CPU_THREADS` | `1` | CPU inference threads: `1`, `2`, or `4` |
+| `MARIAN_EDGE_CPU_WORKERS` | `1` | independent CPU executors: `1` through `8`; Q8 model storage is shared |
 | `MARIAN_EDGE_QUEUE_CAPACITY` | `256` | bounded admission capacity |
 | `MARIAN_EDGE_MAX_BATCH_SIZE` | `16` | maximum logical dynamic batch size |
 | `MARIAN_EDGE_MAX_PADDED_SOURCE_CHARS` | `4096` | padded-character work bound for scheduler compatibility |

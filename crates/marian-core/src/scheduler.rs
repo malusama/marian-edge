@@ -141,11 +141,15 @@ struct Inner {
     request_timeout: Duration,
     enqueue_timeout: Duration,
     info: BackendInfo,
+    pending: AtomicUsize,
 }
 
 #[derive(Clone)]
 pub struct Translator {
-    inner: Arc<Inner>,
+    workers: Arc<[Arc<Inner>]>,
+    next_worker: Arc<AtomicUsize>,
+    stats: Arc<SchedulerStats>,
+    info: BackendInfo,
 }
 
 impl Translator {
@@ -155,98 +159,105 @@ impl Translator {
         B: TranslationBackend,
         F: FnOnce() -> Result<B, BackendError> + Send + 'static,
     {
-        if config.queue_capacity == 0
-            || config.max_batch_size == 0
-            || config.max_padded_source_chars == 0
-        {
-            return Err(BackendError::InvalidInput(
-                "queue_capacity, max_batch_size, and max_padded_source_chars must be greater than zero"
-                    .into(),
-            ));
-        }
-        if config.max_batch_size > MAX_BATCH_SIZE {
-            return Err(BackendError::InvalidInput(format!(
-                "max_batch_size may not exceed {MAX_BATCH_SIZE}"
-            )));
-        }
-
-        let (tx, rx) = std_mpsc::sync_channel(config.queue_capacity);
-        let queue_available = Arc::new(Notify::new());
-        let worker_queue_available = Arc::clone(&queue_available);
+        validate_config(&config)?;
         let stats = Arc::new(SchedulerStats::default());
-        let worker_stats = Arc::clone(&stats);
-        let worker_stopped = Arc::new(AtomicBool::new(false));
-        let worker_stopped_on_thread = Arc::clone(&worker_stopped);
-        let (started_tx, started_rx) = std_mpsc::sync_channel(1);
-        let worker_config = config.clone();
-
-        thread::Builder::new()
-            .name("marian-edge-worker".into())
-            .spawn(move || {
-                let _guard = WorkerStoppedGuard {
-                    stopped: Arc::clone(&worker_stopped_on_thread),
-                    queue_available: Arc::clone(&worker_queue_available),
-                };
-                match factory() {
-                    Ok(mut backend) => {
-                        let info = backend.info();
-                        if started_tx.send(Ok(info)).is_ok() {
-                            worker_loop(
-                                &mut backend,
-                                rx,
-                                &worker_config,
-                                &worker_stats,
-                                &worker_stopped_on_thread,
-                                &worker_queue_available,
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        let _ = started_tx.send(Err(error));
-                    }
-                }
-            })
-            .map_err(|error| BackendError::Model(format!("failed to start worker: {error}")))?;
-
-        let info = started_rx
-            .recv()
-            .map_err(|_| BackendError::Model("worker stopped during initialization".into()))??;
-
+        let worker = start_worker(config, factory, Arc::clone(&stats))?;
+        let info = worker.info.clone();
         Ok(Self {
-            inner: Arc::new(Inner {
-                tx,
-                queue_available,
-                stats,
-                closed: AtomicBool::new(false),
-                worker_stopped,
-                request_timeout: config.request_timeout,
-                enqueue_timeout: config.enqueue_timeout,
-                info,
-            }),
+            workers: Arc::from([worker]),
+            next_worker: Arc::new(AtomicUsize::new(0)),
+            stats,
+            info,
         })
     }
 
+    /// Starts independent backend owners behind one load-aware scheduler.
+    ///
+    /// This is intended for CPU inference where one small-batch executor does
+    /// not saturate the host. Statistics and lifecycle remain service-wide;
+    /// backend state itself stays thread-confined exactly as in [`Self::start`].
+    pub fn start_pool<B, F>(
+        config: SchedulerConfig,
+        worker_count: usize,
+        factory: F,
+    ) -> Result<Self, BackendError>
+    where
+        B: TranslationBackend,
+        F: Fn(usize) -> Result<B, BackendError> + Send + Sync + 'static,
+    {
+        validate_config(&config)?;
+        if worker_count == 0 {
+            return Err(BackendError::InvalidInput(
+                "worker_count must be greater than zero".into(),
+            ));
+        }
+        if worker_count > config.queue_capacity {
+            return Err(BackendError::InvalidInput(format!(
+                "worker_count {worker_count} may not exceed queue_capacity {}",
+                config.queue_capacity
+            )));
+        }
+
+        let stats = Arc::new(SchedulerStats::default());
+        let factory = Arc::new(factory);
+        let mut workers: Vec<Arc<Inner>> = Vec::with_capacity(worker_count);
+        for index in 0..worker_count {
+            let factory = Arc::clone(&factory);
+            let mut worker_config = config.clone();
+            worker_config.queue_capacity = config.queue_capacity / worker_count
+                + usize::from(index < config.queue_capacity % worker_count);
+            let worker = start_worker(worker_config, move || factory(index), Arc::clone(&stats))?;
+            if let Some(first) = workers.first() {
+                if worker.info != first.info {
+                    return Err(BackendError::Model(
+                        "all translator-pool workers must expose identical backend info".into(),
+                    ));
+                }
+            }
+            workers.push(worker);
+        }
+        let info = workers[0].info.clone();
+        Ok(Self {
+            workers: workers.into(),
+            next_worker: Arc::new(AtomicUsize::new(0)),
+            stats,
+            info,
+        })
+    }
+
+    fn next_worker(&self) -> &Inner {
+        let start = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
+        (0..self.workers.len())
+            .map(|offset| &*self.workers[(start + offset) % self.workers.len()])
+            .min_by_key(|worker| worker.pending.load(Ordering::Relaxed))
+            .expect("translator always has at least one worker")
+    }
+
     pub fn backend_info(&self) -> &BackendInfo {
-        &self.inner.info
+        &self.info
     }
 
     pub fn stats(&self) -> &SchedulerStats {
-        &self.inner.stats
+        &self.stats
     }
 
     pub fn is_ready(&self) -> bool {
-        !self.inner.closed.load(Ordering::Acquire)
-            && !self.inner.worker_stopped.load(Ordering::Acquire)
+        self.workers.iter().all(|worker| {
+            !worker.closed.load(Ordering::Acquire) && !worker.worker_stopped.load(Ordering::Acquire)
+        })
     }
 
     pub async fn translate(
         &self,
         input: TranslationInput,
     ) -> Result<TranslationOutput, TranslateError> {
-        if self.inner.closed.load(Ordering::Acquire) {
+        let inner = self.next_worker();
+        inner.pending.fetch_add(1, Ordering::Relaxed);
+        let _pending = PendingGuard(&inner.pending);
+        if inner.closed.load(Ordering::Acquire) {
             return Err(TranslateError::ShuttingDown);
         }
-        if self.inner.worker_stopped.load(Ordering::Acquire) {
+        if inner.worker_stopped.load(Ordering::Acquire) {
             return Err(TranslateError::WorkerStopped);
         }
 
@@ -254,37 +265,37 @@ impl Translator {
         // Publish the gauge first so a very fast worker cannot subtract the
         // job before the submitting task has accounted for it. A sender that
         // is waiting for queue capacity is useful admission-pressure signal.
-        self.inner.stats.queue_depth.fetch_add(1, Ordering::Relaxed);
+        inner.stats.queue_depth.fetch_add(1, Ordering::Relaxed);
         match send_command(
-            &self.inner.tx,
-            &self.inner.queue_available,
-            &self.inner.worker_stopped,
+            &inner.tx,
+            &inner.queue_available,
+            &inner.worker_stopped,
             Command::Translate(Job { input, reply }),
-            self.inner.enqueue_timeout,
+            inner.enqueue_timeout,
         )
         .await
         {
             Ok(()) => {
-                self.inner.stats.accepted.fetch_add(1, Ordering::Relaxed);
+                inner.stats.accepted.fetch_add(1, Ordering::Relaxed);
             }
             Err(EnqueueError::Disconnected) => {
-                self.inner.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                inner.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
                 return Err(TranslateError::WorkerStopped);
             }
             Err(EnqueueError::Full) => {
-                self.inner.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
-                self.inner.stats.rejected.fetch_add(1, Ordering::Relaxed);
+                inner.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                inner.stats.rejected.fetch_add(1, Ordering::Relaxed);
                 return Err(TranslateError::QueueFull);
             }
         }
 
-        match tokio::time::timeout(self.inner.request_timeout, response).await {
+        match tokio::time::timeout(inner.request_timeout, response).await {
             Ok(Ok(Ok(output))) => Ok(output),
             Ok(Ok(Err(error))) => Err(TranslateError::Backend(error)),
             Ok(Err(_)) => Err(TranslateError::WorkerStopped),
             Err(_) => {
-                self.inner.stats.timed_out.fetch_add(1, Ordering::Relaxed);
-                Err(TranslateError::Timeout(self.inner.request_timeout))
+                inner.stats.timed_out.fetch_add(1, Ordering::Relaxed);
+                Err(TranslateError::Timeout(inner.request_timeout))
             }
         }
     }
@@ -322,22 +333,114 @@ impl Translator {
     }
 
     pub async fn shutdown(&self) {
-        if self.inner.closed.swap(true, Ordering::AcqRel) {
-            return;
+        for inner in self.workers.iter() {
+            if inner.closed.swap(true, Ordering::AcqRel) {
+                continue;
+            }
+            let (done, wait) = oneshot::channel();
+            if send_command(
+                &inner.tx,
+                &inner.queue_available,
+                &inner.worker_stopped,
+                Command::Shutdown(done),
+                Duration::from_secs(5),
+            )
+            .await
+            .is_ok()
+            {
+                let _ = tokio::time::timeout(Duration::from_secs(5), wait).await;
+            }
         }
-        let (done, wait) = oneshot::channel();
-        if send_command(
-            &self.inner.tx,
-            &self.inner.queue_available,
-            &self.inner.worker_stopped,
-            Command::Shutdown(done),
-            Duration::from_secs(5),
-        )
-        .await
-        .is_ok()
-        {
-            let _ = tokio::time::timeout(Duration::from_secs(5), wait).await;
-        }
+    }
+}
+
+fn validate_config(config: &SchedulerConfig) -> Result<(), BackendError> {
+    if config.queue_capacity == 0
+        || config.max_batch_size == 0
+        || config.max_padded_source_chars == 0
+    {
+        return Err(BackendError::InvalidInput(
+            "queue_capacity, max_batch_size, and max_padded_source_chars must be greater than zero"
+                .into(),
+        ));
+    }
+    if config.max_batch_size > MAX_BATCH_SIZE {
+        return Err(BackendError::InvalidInput(format!(
+            "max_batch_size may not exceed {MAX_BATCH_SIZE}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn start_worker<B, F>(
+    config: SchedulerConfig,
+    factory: F,
+    stats: Arc<SchedulerStats>,
+) -> Result<Arc<Inner>, BackendError>
+where
+    B: TranslationBackend,
+    F: FnOnce() -> Result<B, BackendError> + Send + 'static,
+{
+    let (tx, rx) = std_mpsc::sync_channel(config.queue_capacity);
+    let queue_available = Arc::new(Notify::new());
+    let worker_queue_available = Arc::clone(&queue_available);
+    let worker_stats = Arc::clone(&stats);
+    let worker_stopped = Arc::new(AtomicBool::new(false));
+    let worker_stopped_on_thread = Arc::clone(&worker_stopped);
+    let (started_tx, started_rx) = std_mpsc::sync_channel(1);
+    let worker_config = config.clone();
+
+    thread::Builder::new()
+        .name("marian-edge-worker".into())
+        .spawn(move || {
+            let _guard = WorkerStoppedGuard {
+                stopped: Arc::clone(&worker_stopped_on_thread),
+                queue_available: Arc::clone(&worker_queue_available),
+            };
+            match factory() {
+                Ok(mut backend) => {
+                    let info = backend.info();
+                    if started_tx.send(Ok(info)).is_ok() {
+                        worker_loop(
+                            &mut backend,
+                            rx,
+                            &worker_config,
+                            &worker_stats,
+                            &worker_stopped_on_thread,
+                            &worker_queue_available,
+                        );
+                    }
+                }
+                Err(error) => {
+                    let _ = started_tx.send(Err(error));
+                }
+            }
+        })
+        .map_err(|error| BackendError::Model(format!("failed to start worker: {error}")))?;
+
+    let info = started_rx
+        .recv()
+        .map_err(|_| BackendError::Model("worker stopped during initialization".into()))??;
+
+    Ok(Arc::new(Inner {
+        tx,
+        queue_available,
+        stats,
+        closed: AtomicBool::new(false),
+        worker_stopped,
+        request_timeout: config.request_timeout,
+        enqueue_timeout: config.enqueue_timeout,
+        info,
+        pending: AtomicUsize::new(0),
+    }))
+}
+
+struct PendingGuard<'a>(&'a AtomicUsize);
+
+impl Drop for PendingGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -840,6 +943,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worker_pool_shares_stats_ordering_and_lifecycle() {
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&factory_calls);
+        let translator = Translator::start_pool(
+            SchedulerConfig {
+                max_batch_size: 2,
+                batch_window: Duration::from_millis(1),
+                ..SchedulerConfig::default()
+            },
+            3,
+            move |_| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(EchoBackend)
+            },
+        )
+        .unwrap();
+
+        let inputs = (0..12)
+            .map(|index| TranslationInput::new(format!("pool-{index}"), "en", "zh"))
+            .collect::<Vec<_>>();
+        let outputs = translator.translate_many(inputs).await.unwrap();
+        assert_eq!(
+            outputs
+                .iter()
+                .map(|output| output.text.as_str())
+                .collect::<Vec<_>>(),
+            (0..12)
+                .map(|index| format!("pool-{index}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(translator.stats().snapshot().completed, 12);
+        assert!(translator.is_ready());
+
+        translator.shutdown().await;
+        assert!(!translator.is_ready());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn identical_requests_are_inferred_once_per_dynamic_batch() {
         let inferred_inputs = Arc::new(AtomicUsize::new(0));
         let backend_counter = Arc::clone(&inferred_inputs);
@@ -984,6 +1126,16 @@ mod tests {
             || Ok(EchoBackend),
         );
         assert!(result.is_err());
+
+        let result = Translator::start_pool(
+            SchedulerConfig {
+                queue_capacity: 2,
+                ..SchedulerConfig::default()
+            },
+            3,
+            |_| Ok(EchoBackend),
+        );
+        assert!(matches!(result, Err(BackendError::InvalidInput(_))));
     }
 
     #[test]

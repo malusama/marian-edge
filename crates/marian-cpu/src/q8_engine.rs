@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashSet, path::Path};
+use std::{cell::RefCell, collections::HashSet, path::Path, sync::Arc};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -135,9 +135,9 @@ struct EncodedBatch {
 /// output projection quantizes each decoder state once and scores only its
 /// lexical-shortlist rows.
 pub struct Q8CpuEngine {
-    model: Q8ModelWeights,
-    positions: Vec<f32>,
-    shortlist: LexicalShortlist,
+    model: Arc<Q8ModelWeights>,
+    positions: Arc<[f32]>,
+    shortlist: Arc<LexicalShortlist>,
     dim: usize,
     heads: usize,
     source_vocab: usize,
@@ -239,9 +239,9 @@ impl Q8CpuEngine {
             )?,
         };
         Ok(Self {
-            model,
-            positions: sinusoidal_positions(architecture.model_dim)?,
-            shortlist,
+            model: Arc::new(model),
+            positions: sinusoidal_positions(architecture.model_dim)?.into(),
+            shortlist: Arc::new(shortlist),
             dim: architecture.model_dim,
             heads: architecture.attention_heads,
             source_vocab: architecture.source_vocab_size,
@@ -323,6 +323,25 @@ impl Q8CpuEngine {
             packed_weight_bytes,
             embedding_bytes: self.model.encoder_embedding.values.len()
                 + self.model.decoder_embedding.values.len(),
+            packed_weight_build_ms: self.packed_weight_build_ms,
+        }
+    }
+
+    /// Create another executor with shared immutable model data and fresh
+    /// request-local scratch buffers.
+    pub fn fork(&self) -> Self {
+        Self {
+            model: Arc::clone(&self.model),
+            positions: Arc::clone(&self.positions),
+            shortlist: Arc::clone(&self.shortlist),
+            dim: self.dim,
+            heads: self.heads,
+            source_vocab: self.source_vocab,
+            max_length_factor: self.max_length_factor,
+            linear_scratch: RefCell::new(Q8LinearScratch::default()),
+            attention_scores: RefCell::new(Vec::new()),
+            shortlist_quantized: RefCell::new(Vec::new()),
+            buffer_pool: RefCell::new(Vec::new()),
             packed_weight_build_ms: self.packed_weight_build_ms,
         }
     }

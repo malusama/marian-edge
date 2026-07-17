@@ -1,0 +1,33 @@
+{
+  "format": "marian-edge.transformer-ssru.v1",
+  "model_id": "mozilla-firefox-translations-en-zh-base-memory",
+  "source_lang": "en",
+  "target_lang": "zh",
+  "weights": "model.intgemm.alphas.bin",
+  "source_vocab": "source.spm",
+  "target_vocab": "target.spm",
+  "shortlist": "shortlist.bin",
+  "precision": "q8",
+  "architecture": {
+    "model_dim": 384,
+    "attention_heads": 8,
+    "encoder_layers": 6,
+    "decoder_layers": 4,
+    "ffn_dim": 1536,
+    "source_vocab_size": 32000,
+    "target_vocab_size": 32000,
+    "eos_id": 0,
+    "unk_id": 1,
+    "max_length_factor": 3
+  },
+  "checksums": {
+    "weights_sha256": "4e5accc141373565ddc8fa1565bceaa8d0c3482a82cab8131c719ebcc6c2157c",
+    "source_vocab_sha256": "bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5",
+    "target_vocab_sha256": "aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d",
+    "shortlist_sha256": "8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681"
+  },
+  "upstream": {
+    "project": "Mozilla Firefox Translations",
+    "registry": "https://storage.googleapis.com/moz-fx-translations-data--303e-prod-translations-data/db/models.json"
+  }
+}

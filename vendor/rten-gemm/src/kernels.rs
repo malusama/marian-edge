@@ -139,7 +139,7 @@ impl<T> Copy for QuantParams<'_, T> {}
 /// - Kernels must initialize all output elements when `beta` is zero.
 ///
 /// [^1]: https://dl.acm.org/doi/pdf/10.1145/2925987
-pub unsafe trait Kernel<LhsT, RhsT, OutT>: Sync {
+pub unsafe trait Kernel<LhsT, RhsT, OutT>: Send + Sync {
     /// Construct a new instance of this kernel, if supported on the current
     /// system.
     fn new() -> Option<Self>

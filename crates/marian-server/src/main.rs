@@ -38,6 +38,14 @@ struct Args {
     )]
     cpu_threads: usize,
 
+    #[arg(
+        long,
+        env = "MARIAN_EDGE_CPU_WORKERS",
+        default_value_t = 1,
+        help = "Independent CPU inference workers; each owns one model executor"
+    )]
+    cpu_workers: usize,
+
     #[arg(long, env = "MARIAN_EDGE_QUEUE_CAPACITY", default_value_t = 256)]
     queue_capacity: usize,
 
@@ -81,6 +89,7 @@ fn apply_legacy_env_aliases() -> Result<()> {
         "BACKEND",
         "MODEL_DIR",
         "CPU_THREADS",
+        "CPU_WORKERS",
         "QUEUE_CAPACITY",
         "MAX_BATCH_SIZE",
         "MAX_PADDED_SOURCE_CHARS",
@@ -120,7 +129,7 @@ async fn run(args: Args) -> Result<()> {
         ..SchedulerConfig::default()
     };
 
-    let translator = create_translator(args.backend, args.model_dir, config)?;
+    let translator = create_translator(args.backend, args.model_dir, config, args.cpu_workers)?;
     let state = AppState::new(translator.clone());
     let app = router(state, args.cors_origin);
     let listener = tokio::net::TcpListener::bind(args.bind)
@@ -130,6 +139,7 @@ async fn run(args: Args) -> Result<()> {
         bind = %args.bind,
         backend = translator.backend_info().name,
         device = translator.backend_info().device,
+        cpu_workers = args.cpu_workers,
         "translation service ready"
     );
 
@@ -157,6 +167,9 @@ fn configure_cpu_threads(args: &Args) -> Result<()> {
     if !matches!(args.cpu_threads, 1 | 2 | 4) {
         anyhow::bail!("pure Rust cpu_threads must be 1, 2, or 4");
     }
+    if !(1..=8).contains(&args.cpu_workers) {
+        anyhow::bail!("pure Rust cpu_workers must be between 1 and 8");
+    }
 
     // SAFETY: this runs at the very start of `main`, before the Tokio runtime,
     // backend owner, matrixmultiply workers, or Rayon global pool are created.
@@ -172,7 +185,10 @@ fn create_translator(
     backend: BackendKind,
     model_dir: PathBuf,
     config: SchedulerConfig,
+    cpu_workers: usize,
 ) -> Result<Translator> {
+    #[cfg(not(feature = "cpu"))]
+    let _ = cpu_workers;
     match backend {
         BackendKind::Echo => Translator::start(config, || Ok(EchoBackend)).map_err(Into::into),
         BackendKind::Auto => {
@@ -185,8 +201,7 @@ fn create_translator(
                 not(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))
             ))]
             {
-                Translator::start(config, move || marian_cpu::CpuModelBackend::load(model_dir))
-                    .map_err(Into::into)
+                start_cpu_translator(config, model_dir, cpu_workers)
             }
             #[cfg(not(any(
                 all(target_os = "macos", target_arch = "aarch64", feature = "metal"),
@@ -215,8 +230,7 @@ fn create_translator(
         BackendKind::Cpu => {
             #[cfg(feature = "cpu")]
             {
-                Translator::start(config, move || marian_cpu::CpuModelBackend::load(model_dir))
-                    .map_err(Into::into)
+                start_cpu_translator(config, model_dir, cpu_workers)
             }
             #[cfg(not(feature = "cpu"))]
             {
@@ -227,6 +241,16 @@ fn create_translator(
             }
         }
     }
+}
+
+#[cfg(feature = "cpu")]
+fn start_cpu_translator(
+    config: SchedulerConfig,
+    model_dir: PathBuf,
+    cpu_workers: usize,
+) -> Result<Translator> {
+    let factory = marian_cpu::CpuModelBackendFactory::new(model_dir)?;
+    Translator::start_pool(config, cpu_workers, move |_| factory.create()).map_err(Into::into)
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]

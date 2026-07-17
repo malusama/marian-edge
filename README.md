@@ -180,7 +180,7 @@ for full fields and error responses.
 ## Current scope
 
 - Apple Silicon direct Metal FP32 and optional mixed-F16 weight storage.
-- Linux AMD64/ARM64 Q8 CPU and pure-Rust CPU with an FP32 manifest.
+- macOS/Linux AMD64/ARM64 Q8 CPU and pure-Rust CPU with an FP32 manifest.
 - SentencePiece, long-text splitting, lexical shortlist, and dynamic batching.
 - English-to-Chinese only; `/detect` is not general language identification.
 - The decoder is fixed at greedy `beam=1`; beam search is not implemented yet.
@@ -207,11 +207,21 @@ target/release/marian-edge-server --backend cpu --cpu-threads 4 \
   --model-dir models/enzh
 ```
 
+Q8 CPU (the measured M1 throughput configuration):
+
+```sh
+MARIAN_EDGE_MODEL_PRECISION=q8 scripts/prepare-enzh-model.sh
+cargo build --locked --release -p marian-server --features cpu
+target/release/marian-edge-server --backend cpu --cpu-threads 1 \
+  --cpu-workers 7 --max-batch-size 3 --batch-window-us 250 \
+  --model-dir models/enzh-q8
+```
+
 Apple Silicon Metal:
 
 ```sh
 scripts/prepare-enzh-model.sh
-cargo build --locked --release -p marian-server --features metal
+cargo build --locked --release -p marian-server --features metal,cpu
 target/release/marian-edge-server --backend metal --model-dir models/enzh
 ```
 

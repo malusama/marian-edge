@@ -19,6 +19,8 @@ mod q8_error;
 mod q8_gemm;
 mod tensor;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::CpuModelBackendFactory;
 pub use backend::{CpuBackend, CpuModelBackend, Q8CpuBackend, TextTokenizer};
 pub use engine::{BatchOutput, CpuEngine};
 pub use legacy_q8::{

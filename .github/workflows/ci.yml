@@ -160,17 +160,17 @@ jobs:
           command: check
 
   apple-native:
-    name: Apple Silicon direct Metal build
+    name: Apple Silicon Metal and CPU build
     runs-on: macos-15
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Install pinned Rust toolchain
         run: rustup show active-toolchain
-      - name: Check direct Metal backend
-        run: cargo check --locked -p marian-server --features metal
-      - name: Clippy direct Metal backend
+      - name: Check dual backend release shape
+        run: cargo check --locked -p marian-server --features metal,cpu
+      - name: Clippy Apple Silicon backends
         run: |
           cargo clippy --locked -p marian-metal --all-targets --features metal -- -D warnings
-          cargo clippy --locked -p marian-server --all-targets --features metal -- -D warnings
+          cargo clippy --locked -p marian-server --all-targets --features metal,cpu -- -D warnings
       - name: Test direct Metal crate
         run: cargo test --locked -p marian-metal --features metal

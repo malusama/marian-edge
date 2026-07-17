@@ -74,6 +74,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 
 [profile.release]
+opt-level = 3
 lto = "thin"
 codegen-units = 1
 # The HTTP panic boundary and backend-owner guard rely on unwinding to turn a

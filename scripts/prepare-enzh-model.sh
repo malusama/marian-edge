@@ -2,7 +2,13 @@
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-OUTPUT=${1:-"$ROOT/models/enzh"}
+PRECISION=${MARIAN_EDGE_MODEL_PRECISION:-fp32}
+case "$PRECISION" in
+  fp32) DEFAULT_OUTPUT="$ROOT/models/enzh" ;;
+  q8) DEFAULT_OUTPUT="$ROOT/models/enzh-q8" ;;
+  *) echo "MARIAN_EDGE_MODEL_PRECISION must be fp32 or q8" >&2; exit 2 ;;
+esac
+OUTPUT=${1:-"$DEFAULT_OUTPUT"}
 CACHE=${MODEL_CACHE_DIR:-"$ROOT/.cache/mozilla-enzh"}
 UV_BIN=${UV_BIN:-uv}
 PYTHON_VERSION=${MARIAN_EDGE_CONVERTER_PYTHON:-${MARIAN_MLX_CONVERTER_PYTHON:-3.12}}
@@ -39,14 +45,21 @@ download() {
   mv "$destination.part" "$destination"
 }
 
-download "$BASE/student-finetuned/final.model.npz.best-chrf.npz" "$CACHE/model.npz" \
-  9604368d0fb19aa431a82824cedd92205a68512b89086cbe8c4d8bd1585a8950
+if [ "$PRECISION" = fp32 ]; then
+  download "$BASE/student-finetuned/final.model.npz.best-chrf.npz" "$CACHE/model.npz" \
+    9604368d0fb19aa431a82824cedd92205a68512b89086cbe8c4d8bd1585a8950
+fi
 download "$BASE/exported/srcvocab.enzh.spm.gz" "$CACHE/source.spm.gz" \
   7846e3c236388390f4e5d321f8413d67f34c1bab5f066165eeb673bfd07607cc
 download "$BASE/exported/trgvocab.enzh.spm.gz" "$CACHE/target.spm.gz" \
   4d641ce165b1f8478ee2ffb5149d2d46fab3779dc8fa1e9b97f9af1d2206c091
 download "$BASE/exported/lex.50.50.enzh.s2t.bin.gz" "$CACHE/shortlist.bin.gz" \
   806f75821c0b838f4a8f4afe5bab3db8289cb7e5187753ba04c3bceadd75687a
+
+if [ "$PRECISION" = q8 ]; then
+  download "$BASE/exported/model.enzh.intgemm.alphas.bin.gz" "$CACHE/model.intgemm.alphas.bin.gz" \
+    7f255403b3bb2502f08ac4d5ca397a8a5a13f899d2f2e987a4934e089d241d16
+fi
 
 gzip -dc "$CACHE/source.spm.gz" > "$CACHE/source.spm.part"
 mv "$CACHE/source.spm.part" "$CACHE/source.spm"
@@ -59,20 +72,31 @@ verify bd9b65504acc6d9726dd281f7defc2adb7c2c22d0688fe2f84697de25197c8c5 "$CACHE/
 verify aded6993c36e440284d11cec3f6b8aef9c0e43188a772d80be342a713adf223d "$CACHE/target.spm"
 verify 8575d8daa10e2dbff316dcdf8e1ce475357bcc2c92bdc63b736a2d5add22f681 "$CACHE/shortlist.bin"
 
-"$UV_BIN" run --isolated --python "$PYTHON_VERSION" \
-  --with numpy==2.5.1 --with safetensors==0.8.0 \
-  python "$ROOT/tools/convert_marian.py" \
-  --model "$CACHE/model.npz" \
-  --source-vocab "$CACHE/source.spm" \
-  --target-vocab "$CACHE/target.spm" \
-  --shortlist "$CACHE/shortlist.bin" \
-  --output "$STAGING" \
-  --force
+if [ "$PRECISION" = q8 ]; then
+  mkdir -p "$STAGING"
+  gzip -dc "$CACHE/model.intgemm.alphas.bin.gz" > "$STAGING/model.intgemm.alphas.bin"
+  verify 4e5accc141373565ddc8fa1565bceaa8d0c3482a82cab8131c719ebcc6c2157c \
+    "$STAGING/model.intgemm.alphas.bin"
+  cp "$CACHE/source.spm" "$STAGING/source.spm"
+  cp "$CACHE/target.spm" "$STAGING/target.spm"
+  cp "$CACHE/shortlist.bin" "$STAGING/shortlist.bin"
+  cp "$ROOT/packaging/models/enzh-q8-manifest.json" "$STAGING/manifest.json"
+else
+  "$UV_BIN" run --isolated --python "$PYTHON_VERSION" \
+    --with numpy==2.5.1 --with safetensors==0.8.0 \
+    python "$ROOT/tools/convert_marian.py" \
+    --model "$CACHE/model.npz" \
+    --source-vocab "$CACHE/source.spm" \
+    --target-vocab "$CACHE/target.spm" \
+    --shortlist "$CACHE/shortlist.bin" \
+    --output "$STAGING" \
+    --force
 
-[ -s "$STAGING/model.fp32.safetensors" ] || {
-  echo "converted FP32 weights are missing" >&2
-  exit 1
-}
+  [ -s "$STAGING/model.fp32.safetensors" ] || {
+    echo "converted FP32 weights are missing" >&2
+    exit 1
+  }
+fi
 grep -Eq '"format"[[:space:]]*:[[:space:]]*"marian-edge\.transformer-ssru\.v1"' \
   "$STAGING/manifest.json" || {
   echo "converted model manifest is invalid" >&2
