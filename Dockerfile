@@ -12,7 +12,7 @@ RUN MARIAN_EDGE_BUILD_GIT_SHA="$VCS_REF" \
     cargo build --locked --release -p marian-server --features cpu && \
     install -D -m 0755 target/release/marian-edge-server /out/bin/marian-edge-server
 
-FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df AS runtime
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
 ARG VERSION=0.7.0
 ARG VCS_REF=unknown
