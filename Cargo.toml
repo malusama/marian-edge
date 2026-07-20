@@ -60,7 +60,7 @@ objc2-metal-performance-shaders = { version = "0.3.2", default-features = false,
     "MPSMatrixMultiplication",
 ] }
 rten-gemm = "=0.21.0"
-rten-tensor = "=0.21.0"
+rten-tensor = "=0.24.0"
 rayon = "=1.12.0"
 safetensors = "0.8.0"
 sentencepiece-rust = "=0.1.1"
