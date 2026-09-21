@@ -377,3 +377,32 @@ submissions, 28,087 GPU execution-point rows, and 6,608 completed
 command-buffer rows. The backend info response independently reported
 `device: Apple M1`. These observations prove GPU use for that historical run,
 not for the replacement backend.
+
+## Mozilla Japanese pivot on M1 (2026-09-21)
+
+The same Apple M1 / 16 GB service now optionally holds `ja-en base-memory 3.1`
+and the existing Mozilla `en-zh base-memory` model on one Metal scheduler
+thread. Both run FP32. Each item stays a separate sequence through both models.
+
+On exactly the Japanese cue groups previously measured with Hunyuan-MT-7B-4bit,
+loopback HTTP `/imme` timings (three runs, median) were:
+
+| Input | Mozilla JA → EN → ZH | Previous Hunyuan single trial |
+| --- | ---: | ---: |
+| 4 cues, offset 0 | 0.131 s | 4.118 s |
+| 4 cues, offset 4 | 0.184 s | 4.180 s |
+| 8 cues, offset 0 | 0.229 s | 7.589 s |
+
+This is roughly 23–33x lower translation latency on those samples, not an
+end-to-end ASR/subtitle speedup or an equal-quality claim. The new times include
+loopback HTTP and both stages. Existing English-to-Chinese outputs matched the
+old service on the three checked sentences. General-language smoke tests still
+showed real semantic errors: omitted Japanese subjects could become the wrong
+English pronoun, and an English sentence about tomorrow's meeting was translated
+as today by the existing EN → ZH model. No hand-written correction was applied.
+
+M1 artifacts: `/tmp/marian-jaen-candidate/matched-benchmark.json` and
+`/tmp/marian-jaen-candidate/benchmark.json`. Model preparation is reproducible via
+`scripts/prepare-jaen-model.sh` with pinned upstream SHA-256 checksums. The local
+macOS build used `CARGO_PROFILE_RELEASE_STRIP=none` because stripping host proc
+macro dylibs produced a misaligned LINKEDIT string pool on this toolchain/OS.

@@ -270,6 +270,14 @@ fn normalize_lang(language: &str) -> Result<String, ApiError> {
 }
 
 fn detect_language(text: &str) -> &'static str {
+    // Kana identify Japanese; Han-only strings remain ambiguous and require
+    // an explicit source language from subtitle clients.
+    if text
+        .chars()
+        .any(|c| matches!(c, '\u{3040}'..='\u{30ff}' | '\u{ff66}'..='\u{ff9f}'))
+    {
+        return "ja";
+    }
     let mut cjk = 0usize;
     let mut letters = 0usize;
     for character in text.chars() {

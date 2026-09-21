@@ -238,3 +238,14 @@ privately as described in [SECURITY](SECURITY.md).
 Service code and project MSL kernels are MIT licensed. Model files are not
 distributed in the repository or image; download scripts fetch and verify them
 from upstream. See [third-party notices](THIRD_PARTY_NOTICES.md).
+
+### Japanese captions via Mozilla models
+
+Run `scripts/prepare-jaen-model.sh models/jaen`, then add
+`--ja-en-model-dir models/jaen` (or `MARIAN_EDGE_JA_EN_MODEL_DIR`) to the Metal
+server using the existing English-to-Chinese `--model-dir`. Both models stay
+on one scheduler thread. `/translate` and `/imme` accept explicit `ja -> en`,
+`en -> zh`, and `ja -> zh` directions. Input rows remain separate through the
+pivot, without numbered prompts. Kana are recognized by `/detect`; Han-only
+Japanese needs an explicit source language. Greedy decoding and an English
+pivot can lose pronouns, temporal meaning or tone; benchmark real captions.

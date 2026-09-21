@@ -37,6 +37,10 @@ pub struct MetalBackend {
 }
 
 impl MetalBackend {
+    pub fn direction(&self) -> (&str, &str) {
+        (&self.source_lang, &self.target_lang)
+    }
+
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self, BackendError> {
         let config = MetalConfig::from_env().map_err(BackendError::Model)?;
         Self::load_with_config(model_dir, &config)

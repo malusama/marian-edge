@@ -170,7 +170,7 @@ curl -fsS "$SERVICE_ORIGIN/translate" \
 - 支持 Apple Silicon direct Metal FP32，以及可选的 mixed-f16 权重存储。
 - 支持 Linux AMD64/ARM64 Q8 CPU，以及使用 FP32 模型清单的纯 Rust CPU。
 - 支持 SentencePiece、长文本分段、词表 shortlist 和动态批处理。
-- 当前只包含英译中模型；`/detect` 不是通用语种识别。
+- 默认英译中；添加 `--ja-en-model-dir` 后，同一 Metal 服务支持日译英及经英语中转的日译中。`/detect` 能识别假名，纯汉字日文需明确传 `from: "ja"`。
 - 当前解码器固定为 `beam=1`（贪心解码），尚未实现 `beam>1` 的束搜索。
 
 beam search 的评估计划见[优化路线图](docs/OPTIMIZATION_ROADMAP.md)。历史性能数据
@@ -212,3 +212,15 @@ target/release/marian-edge-server --backend metal --model-dir models/enzh
 
 服务代码与项目自带的 MSL kernel 使用 MIT 许可证。模型文件不随仓库或镜像
 分发；下载脚本从上游获取并校验。详情见[第三方声明](THIRD_PARTY_NOTICES.md)。
+
+### Mozilla 日译中（经英语中转）
+
+```sh
+./scripts/prepare-jaen-model.sh models/jaen
+marian-edge-server --backend metal --model-dir models/enzh \
+  --ja-en-model-dir models/jaen --bind 127.0.0.1:3100
+```
+
+`--ja-en-model-dir`（环境变量 `MARIAN_EDGE_JA_EN_MODEL_DIR`）启用 Mozilla `ja-en base-memory 3.1` 与已有 `en-zh` 模型。两者在同一个调度线程上依次执行，支持原有 `/translate`、`/imme` 接口；源语言传 `ja`，目标传 `zh`。每条输入保持独立序列，批次顺序不变，任何阶段缺失输出会使请求失败，不把原文冒充译文。英中请求直接使用原模型。
+
+日英模型使用共享 64K 词表，转换器展开为运行时的标准编码器／解码器权重名称。下载脚本固定 Mozilla 发布产物及 SHA-256；不需要下载 Hunyuan 或其他大语言模型。默认仍采用贪心解码，省略主语和两次翻译可能带来指代、时间词或语气误差；需要按实际文本评估质量。

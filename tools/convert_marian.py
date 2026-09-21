@@ -97,8 +97,9 @@ def validate_graph_config(raw: bytes) -> str:
         'transformer-preprocess: ""',
         "transformer-postprocess: dan",
         "transformer-postprocess-emb: d",
-        "tied-embeddings: true",
     )
+    if not any(line in config.splitlines() for line in ("tied-embeddings: true", "tied-embeddings-all: true")):
+        raise ValueError("NPZ requires tied decoder output embeddings")
     missing = [line for line in required_lines if line not in config]
     if missing:
         raise ValueError(f"NPZ graph is unsupported; missing config: {missing}")
@@ -112,10 +113,14 @@ def validate_shapes(tensors: dict[str, np.ndarray]) -> None:
         raise ValueError(f"NPZ is missing {len(missing)} tensors: {missing[:8]}")
     if extras := sorted(actual - required):
         raise ValueError(f"NPZ contains unexpected tensors: {extras[:8]}")
+    source_size = tensors["encoder_Wemb"].shape[0]
+    target_size = tensors["decoder_Wemb"].shape[0]
+    if source_size not in (32000, 64000) or target_size not in (32000, 64000):
+        raise ValueError("unsupported Mozilla vocabulary size")
     expected = {
-        "encoder_Wemb": (32000, 384),
-        "decoder_Wemb": (32000, 384),
-        "decoder_ff_logit_out_b": (1, 32000),
+        "encoder_Wemb": (source_size, 384),
+        "decoder_Wemb": (target_size, 384),
+        "decoder_ff_logit_out_b": (1, target_size),
     }
     for name, shape in expected.items():
         if tensors[name].shape != shape:
@@ -211,6 +216,16 @@ def main() -> None:
             for name in archive.files
             if name != "special:model.yml"
         }
+    # JA -> EN shares a 64k embedding; EN -> ZH has two 32k embeddings.
+    # The runtime's canonical tensor names keep all inference paths identical.
+    if "Wemb" in tensors:
+        if "tied-embeddings-all: true" not in graph_config.splitlines():
+            raise ValueError("shared Wemb without tied-embeddings-all")
+        if "encoder_Wemb" in tensors or "decoder_Wemb" in tensors:
+            raise ValueError("ambiguous shared and separate embeddings")
+        shared = tensors.pop("Wemb")
+        tensors["encoder_Wemb"] = shared
+        tensors["decoder_Wemb"] = shared
     validate_shapes(tensors)
 
     dtype = np.float32 if args.dtype == "fp32" else np.float16
@@ -254,8 +269,8 @@ def main() -> None:
             "encoder_layers": 6,
             "decoder_layers": 4,
             "ffn_dim": 1536,
-            "source_vocab_size": 32000,
-            "target_vocab_size": 32000,
+            "source_vocab_size": tensors["encoder_Wemb"].shape[0],
+            "target_vocab_size": tensors["decoder_Wemb"].shape[0],
             "eos_id": 0,
             "unk_id": 1,
             "max_length_factor": 3,

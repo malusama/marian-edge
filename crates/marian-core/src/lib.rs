@@ -5,12 +5,14 @@
 //! serve many concurrent HTTP requests.
 
 mod backend;
+mod pivot;
 #[cfg(not(target_arch = "wasm32"))]
 mod scheduler;
 mod segmenter;
 mod types;
 
 pub use backend::{EchoBackend, TranslationBackend};
+pub use pivot::PivotBackend;
 #[cfg(not(target_arch = "wasm32"))]
 pub use scheduler::{SchedulerConfig, SchedulerStats, StatsSnapshot, Translator};
 pub use segmenter::{

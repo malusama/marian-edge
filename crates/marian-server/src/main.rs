@@ -30,6 +30,10 @@ struct Args {
     #[arg(long, env = "MARIAN_EDGE_MODEL_DIR", default_value = "models/enzh")]
     model_dir: PathBuf,
 
+    /// Optional Mozilla JA -> EN model; enables JA -> EN and JA -> ZH via EN.
+    #[arg(long, env = "MARIAN_EDGE_JA_EN_MODEL_DIR")]
+    ja_en_model_dir: Option<PathBuf>,
+
     #[arg(
         long,
         env = "MARIAN_EDGE_CPU_THREADS",
@@ -88,6 +92,7 @@ fn apply_legacy_env_aliases() -> Result<()> {
         "BIND",
         "BACKEND",
         "MODEL_DIR",
+        "JA_EN_MODEL_DIR",
         "CPU_THREADS",
         "CPU_WORKERS",
         "QUEUE_CAPACITY",
@@ -129,7 +134,13 @@ async fn run(args: Args) -> Result<()> {
         ..SchedulerConfig::default()
     };
 
-    let translator = create_translator(args.backend, args.model_dir, config, args.cpu_workers)?;
+    let translator = create_translator(
+        args.backend,
+        args.model_dir,
+        args.ja_en_model_dir,
+        config,
+        args.cpu_workers,
+    )?;
     let state = AppState::new(translator.clone());
     let app = router(state, args.cors_origin);
     let listener = tokio::net::TcpListener::bind(args.bind)
@@ -184,11 +195,35 @@ fn configure_cpu_threads(args: &Args) -> Result<()> {
 fn create_translator(
     backend: BackendKind,
     model_dir: PathBuf,
+    ja_en_model_dir: Option<PathBuf>,
     config: SchedulerConfig,
     cpu_workers: usize,
 ) -> Result<Translator> {
     #[cfg(not(feature = "cpu"))]
     let _ = cpu_workers;
+    if let Some(ja_en_dir) = ja_en_model_dir {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "metal"))]
+        if matches!(backend, BackendKind::Metal | BackendKind::Auto) {
+            let metal_config = marian_metal::MetalConfig::from_env().map_err(anyhow::Error::msg)?;
+            return Translator::start(config, move || {
+                let first =
+                    marian_metal::MetalBackend::load_with_config(&ja_en_dir, &metal_config)?;
+                let second =
+                    marian_metal::MetalBackend::load_with_config(&model_dir, &metal_config)?;
+                if first.direction() != ("ja", "en") || second.direction() != ("en", "zh") {
+                    return Err(marian_core::BackendError::Model(
+                        "pivot models must be JA -> EN and EN -> ZH".into(),
+                    ));
+                }
+                Ok(marian_core::PivotBackend::new(
+                    first, second, "ja", "en", "zh",
+                ))
+            })
+            .map_err(Into::into);
+        }
+        let _ = ja_en_dir;
+        anyhow::bail!("--ja-en-model-dir currently requires the Metal backend");
+    }
     match backend {
         BackendKind::Echo => Translator::start(config, || Ok(EchoBackend)).map_err(Into::into),
         BackendKind::Auto => {
