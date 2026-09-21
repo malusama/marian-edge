@@ -182,7 +182,7 @@ for full fields and error responses.
 - Apple Silicon direct Metal FP32 and optional mixed-F16 weight storage.
 - macOS/Linux AMD64/ARM64 Q8 CPU and pure-Rust CPU with an FP32 manifest.
 - SentencePiece, long-text splitting, lexical shortlist, and dynamic batching.
-- English-to-Chinese only; `/detect` is not general language identification.
+- English-to-Chinese by default; `--ja-en-model-dir` enables Japanese-to-English and Japanese-to-Chinese via English on Metal. `/detect` recognizes kana; Han-only Japanese needs an explicit source language.
 - The decoder is fixed at greedy `beam=1`; beam search is not implemented yet.
 
 The beam-search evaluation plan is in the [optimization
