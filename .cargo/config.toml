@@ -3,3 +3,10 @@ MACOSX_DEPLOYMENT_TARGET = { value = "14.0", force = false }
 
 [target.aarch64-apple-darwin]
 rustflags = ["-C", "link-arg=-mmacosx-version-min=14.0"]
+
+# Optional huacnlee/cargo v0.102.0-4 policy; upstream Cargo ignores build.gc.
+# Applies to local shared dependency storage, independently of CI sccache.
+[build.gc]
+shared-max-size = "10 GiB"
+max-unused = "1 day"
+frequency = "1 hour"
